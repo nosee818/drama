@@ -69,7 +69,7 @@
           <div class="setup-panel-head compact">
             <div>
               <div class="setup-title">快捷模板</div>
-              <div class="setup-desc">选择服务类型后，直接用模板填充推荐的 `provider / base URL / model`。</div>
+              <div class="setup-desc">选择服务类型后，直接用模板填充 provider、Base URL 与默认模型，也可以完全自定义。</div>
             </div>
           </div>
           <div class="template-row">
@@ -100,13 +100,18 @@
                     <div class="config-line">
                       <span class="config-provider">{{ c.provider }}</span>
                       <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
-                    </div>
-                    <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
-                    <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
-                  </div>
-                </div>
-                <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
-                <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
+	                    </div>
+	                    <div class="config-flags">
+	                      <span v-if="c.is_default" class="tag tag-accent">默认</span>
+	                      <span v-if="!c.is_active" class="tag">停用</span>
+	                    </div>
+	                    <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
+	                    <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
+	                  </div>
+	                </div>
+	                <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
+	                <button class="btn btn-ghost btn-sm" :disabled="c.is_default" @click="setDefaultCfg(c)">{{ c.is_default ? '默认' : '设为默认' }}</button>
+	                <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
                 <label class="toggle"><input type="checkbox" :checked="c.is_active" @change="toggleCfg(c)"><span /></label>
                 <button class="btn btn-ghost btn-icon" @click="startEditCfg(c)"><Pencil :size="13" /></button>
                 <button class="btn btn-ghost btn-icon" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
@@ -271,13 +276,13 @@
     </div>
 
     <!-- AI Config Dialog -->
-    <div v-if="cfgDialog" class="overlay" @click.self="cfgDialog = false">
+    <div v-if="cfgDialog" class="overlay">
       <form class="modal card config-modal" @submit.prevent="saveCfg">
         <div class="config-modal-head">
           <div>
             <div class="setup-kicker">{{ cfgEditId ? 'Edit Config' : 'New Config' }}</div>
             <h2 class="modal-title">{{ cfgEditId ? '编辑服务配置' : `添加${serviceMeta[cfgForm.service_type].label}服务` }}</h2>
-            <div class="modal-note">推荐先选择模板，系统会自动填入更合理的 `Base URL` 与默认模型。</div>
+            <div class="modal-note">可使用模板快速填入，也可手动填写任何兼容 OpenAI、任务式 API 或 ComfyUI 工作流服务。</div>
           </div>
           <span class="tag tag-accent">{{ serviceMeta[cfgForm.service_type].label }}</span>
         </div>
@@ -296,8 +301,12 @@
           <span class="field-label">配置名称</span>
           <input v-model="cfgForm.name" class="input" placeholder="如 火宝默认图像服务" />
         </label>
-        <label class="field"><span class="field-label">服务商</span>
-          <BaseSelect v-model="cfgForm.provider" :options="providerSelectOptions" placeholder="选择服务商" searchable />
+        <label class="field"><span class="field-label">服务商标识</span>
+          <input v-model.trim="cfgForm.provider" class="input" list="provider-options" placeholder="如 openai、yunyan、comfyui、custom" />
+          <datalist id="provider-options">
+            <option v-for="p in providers" :key="p" :value="p" />
+          </datalist>
+          <span class="field-hint">可任意输入自定义渠道名。未知图片渠道按 OpenAI 图片接口调用，未知视频渠道按通用任务接口调用。</span>
         </label>
         <label class="field">
           <span class="field-label">优先级</span>
@@ -305,12 +314,25 @@
           <span class="field-hint">数值越高越优先。工作台默认会优先使用同类型里优先级最高的启用配置。</span>
         </label>
         <label class="field"><span class="field-label">API Key</span><input v-model="cfgForm.api_key" class="input" type="password" placeholder="sk-..." /></label>
-        <label class="field"><span class="field-label">Base URL</span><input v-model="cfgForm.base_url" class="input" placeholder="https://..." /></label>
+        <label class="field">
+          <span class="field-label">Base URL</span>
+          <textarea v-model="cfgForm.base_url" class="textarea mono" rows="3" placeholder="https://server-a:8188&#10;https://server-b:8188" />
+          <span class="field-hint">ComfyUI 可填写多个地址，一行一个或用英文逗号分隔；任务会按轮询分发，轮询查询会固定回同一台服务器。</span>
+        </label>
+        <div class="field-row">
+          <label class="field"><span class="field-label">生成端点</span><input v-model="cfgForm.endpoint" class="input" placeholder="如 /v1/images/generations 或 /prompt" /></label>
+          <label class="field"><span class="field-label">查询端点</span><input v-model="cfgForm.query_endpoint" class="input" placeholder="如 /v1/tasks/{taskId} 或 /history/{taskId}" /></label>
+        </div>
         <div class="endpoint-hint">
           <span class="dim">实际端点前缀：</span>
           <span class="mono">{{ endpointHint }}</span>
         </div>
         <label class="field"><span class="field-label">模型（逗号分隔）</span><input v-model="cfgForm.modelStr" class="input" placeholder="model-name" /></label>
+        <label class="field">
+          <span class="field-label">高级 JSON 配置</span>
+          <textarea v-model="cfgForm.settingsStr" class="textarea mono" rows="8" placeholder='ComfyUI 示例：{"workflow": {"3": {"inputs": {"text": "{{prompt}}"}}}}；通用视频可填 {"requestTemplate": {"prompt": "{{prompt}}", "model": "{{model}}"}}' />
+          <span class="field-hint" v-pre>ComfyUI 使用 workflow 工作流 JSON，支持 {{prompt}}、{{model}}、{{width}}、{{height}}、{{seed}}、{{input_image}}、{{first_frame}}、{{last_frame}}、{{duration}} 等占位符。</span>
+        </label>
         <div v-if="cfgTestResult" class="test-result" :class="{ ok: cfgTestResult.reachable, bad: !cfgTestResult.reachable }">
           <div class="test-result-head">
             <span class="tag" :class="cfgTestResult.reachable ? 'tag-success' : 'tag-error'">{{ cfgTestResult.status || 'ERROR' }}</span>
@@ -331,7 +353,7 @@
     </div>
 
     <!-- Huobao Preset Dialog -->
-    <div v-if="presetDialog" class="overlay" @click.self="presetDialog = false">
+    <div v-if="presetDialog" class="overlay">
       <form class="modal card config-modal" @submit.prevent="applyHuobaoPreset">
         <div class="config-modal-head">
           <div>
@@ -366,7 +388,7 @@
     </div>
 
     <!-- Add Skill Dialog -->
-    <div v-if="addSkillDialog" class="overlay" @click.self="addSkillDialog = false">
+    <div v-if="addSkillDialog" class="overlay">
       <form class="modal card" @submit.prevent="confirmAddSkill">
         <h2 class="modal-title">新增 Skill — {{ selectedAgentLabel }}</h2>
         <label class="field">
@@ -418,10 +440,10 @@ const cfgEditId = ref(null)
 const presetDialog = ref(false)
 const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
+const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: 'text', priority: 0 })
 const huobaoForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
+const providers = ['ali', 'chatfire', 'comfyui', 'custom', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine', 'yunyan']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -434,16 +456,21 @@ const providerPresets = {
     chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-preview'] },
     openrouter: { label: 'OpenRouter 推荐', baseUrl: 'https://openrouter.ai/api', models: ['google/gemini-3-flash-preview'] },
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
+    custom: { label: '自定义兼容', baseUrl: 'https://api.example.com', models: ['model-name'], endpoint: '/v1' },
   },
   image: {
     chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['doubao-seedream-4-5-251128'] },
     gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-image-preview'] },
     volcengine: { label: '火山推荐', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-4-0-250828'] },
+    custom: { label: 'OpenAI 兼容', baseUrl: 'https://api.example.com', models: ['image-model'], endpoint: '/v1/images/generations' },
+    comfyui: { label: 'ComfyUI 工作流', baseUrl: 'http://127.0.0.1:8188', models: ['workflow'], endpoint: '/prompt', queryEndpoint: '/history/{taskId}', settings: { workflow: {} } },
   },
   video: {
     volcengine: { label: '火宝视频', baseUrl: 'https://api.chatfire.site/volcengine', models: ['doubao-seedance-1-5-pro-251215'] },
     vidu: { label: 'Vidu 推荐', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
     ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'] },
+    custom: { label: '通用任务 API', baseUrl: 'https://api.example.com', models: ['video-model'], endpoint: '/v1/videos/generations', queryEndpoint: '/v1/videos/tasks/{taskId}' },
+    comfyui: { label: 'ComfyUI 工作流', baseUrl: 'http://127.0.0.1:8188', models: ['workflow'], endpoint: '/prompt', queryEndpoint: '/history/{taskId}', settings: { workflow: {} } },
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
@@ -464,14 +491,16 @@ const endpointPrefixes = {
   volcengine: '/api/v3',
   ali: '/api/v1',
   vidu: '/ent/v2',
+  comfyui: '',
+  custom: '',
 }
 
 const endpointHint = computed(() => {
   const provider = cfgForm.provider
-  const base = cfgForm.base_url || 'https://...'
+  const base = (cfgForm.base_url || 'https://...').split(/[\n,]+/).map(item => item.trim()).filter(Boolean)[0] || 'https://...'
   const prefix = endpointPrefixes[provider] || ''
   if (!provider) return '选择服务商后显示推荐端点前缀'
-  return `${base}${prefix}`
+  return `${base}${cfgForm.endpoint || prefix}`
 })
 
 function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
@@ -486,17 +515,32 @@ function applyProviderPreset(type, provider) {
   if (!preset) return
   cfgForm.provider = provider
   cfgForm.base_url = preset.baseUrl
+  cfgForm.endpoint = preset.endpoint || ''
+  cfgForm.query_endpoint = preset.queryEndpoint || ''
+  cfgForm.settingsStr = preset.settings ? JSON.stringify(preset.settings, null, 2) : ''
   cfgForm.modelStr = preset.models.join(', ')
   cfgForm.name = `${preset.label}-${serviceMeta[type].label}`
 }
 
+function normalizeSettingsInput() {
+  const raw = cfgForm.settingsStr.trim()
+  if (!raw) return ''
+  JSON.parse(raw)
+  return raw
+}
+
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
 async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() }
+async function setDefaultCfg(c) {
+  await aiConfigAPI.update(c.id, { is_default: true, is_active: true })
+  toast.success(`${serviceMeta[c.service_type]?.label || '服务'}默认模型已更新`)
+  loadCfgs()
+}
 async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() }
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0 })
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0 })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -509,6 +553,9 @@ function startEditCfg(c) {
     provider: c.provider,
     api_key: c.api_key || '',
     base_url: c.base_url || '',
+    endpoint: c.endpoint || '',
+    query_endpoint: c.query_endpoint || '',
+    settingsStr: c.settings || '',
     modelStr: fmtModel(c.model),
     service_type: c.service_type,
     priority: c.priority ?? 0,
@@ -528,13 +575,20 @@ async function testCfgPayload(payload) {
   }
 }
 async function testDraftCfg() {
-  await testCfgPayload({
-    service_type: cfgForm.service_type,
-    provider: cfgForm.provider,
-    api_key: cfgForm.api_key,
-    base_url: cfgForm.base_url,
-    model: cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean),
-  })
+  try {
+    await testCfgPayload({
+      service_type: cfgForm.service_type,
+      provider: cfgForm.provider,
+      api_key: cfgForm.api_key,
+      base_url: cfgForm.base_url,
+      endpoint: cfgForm.endpoint,
+      query_endpoint: cfgForm.query_endpoint,
+      settings: normalizeSettingsInput(),
+      model: cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean),
+    })
+  } catch (e) {
+    toast.error('高级 JSON 配置不是合法 JSON')
+  }
 }
 async function testExistingCfg(c) {
   startEditCfg(c)
@@ -543,6 +597,9 @@ async function testExistingCfg(c) {
     provider: c.provider,
     api_key: c.api_key || '',
     base_url: c.base_url || '',
+    endpoint: c.endpoint || '',
+    query_endpoint: c.query_endpoint || '',
+    settings: c.settings || '',
     model: Array.isArray(c.model) ? c.model : [],
   })
 }
@@ -550,10 +607,12 @@ async function saveCfg() {
   if (!cfgForm.provider) { toast.warning('选择服务商'); return }
   const models = cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean)
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
-    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
+    const settings = normalizeSettingsInput()
+    const payload = { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, endpoint: cfgForm.endpoint, query_endpoint: cfgForm.query_endpoint, settings, model: models, priority: cfgForm.priority }
+    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, payload)
+    else await aiConfigAPI.create({ ...payload, service_type: cfgForm.service_type, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}` })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
-  } catch (e) { toast.error(e.message) }
+  } catch (e) { toast.error(e.message?.includes('JSON') ? '高级 JSON 配置不是合法 JSON' : e.message) }
 }
 async function applyHuobaoPreset() {
   if (!huobaoForm.apiKey) {
@@ -617,7 +676,10 @@ const defaultPrompts = {
 - 场景：按【地点+时间段】精确匹配；同地点不同时段视为新场景
 
 提取要求：
-- 角色要包含完整的外貌特征描述（发型、服装、体态等）
+- 角色库是跨集复用的“人物参考图”设定，不是当前剧情瞬间；角色字段必须只保存稳定身份和稳定外貌
+- 角色 appearance 必须尽量详细，包含：性别/年龄感、身高体态、国籍或地域气质、脸型五官、发型发色、是否戴眼镜、常服/基础服装、标志性配饰、整体气质
+- 不要把当前镜头状态写进角色 appearance / description，例如：昏迷、倒地、受伤、流血、哭泣、惊恐、面容模糊、某一幕的姿势或表情
+- 如果剧本只描述了临时状态，应推断并补全适合作为参考图的中性稳定设定；临时动作、表情、特定场景服装留给后续分镜 image_prompt / video_prompt
 - 场景要包含光线、色调、氛围等视觉信息
 - 不要遗漏任何有台词或重要动作的角色`,
   storyboard_breaker: `你是资深影视分镜师，擅长将剧本拆解为分镜方案。
@@ -835,7 +897,23 @@ async function saveSkill(id) {
   }
 }
 
-onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills() })
+function handleSettingsDialogKeydown(event) {
+  if (event.key !== 'Escape') return
+  if (cfgDialog.value) cfgDialog.value = false
+  else if (presetDialog.value) presetDialog.value = false
+  else if (addSkillDialog.value) addSkillDialog.value = false
+}
+
+onMounted(() => {
+  loadCfgs()
+  loadAgents()
+  loadAllSkills()
+  window.addEventListener('keydown', handleSettingsDialogKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleSettingsDialogKeydown)
+})
 </script>
 
 <style scoped>
@@ -1023,6 +1101,7 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills() })
 .config-info { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .config-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .config-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.config-flags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .config-provider { font-size: 13px; font-weight: 600; }
 .config-name { font-size: 12px; color: var(--text-2); }
 .config-model { font-size: 11px; color: var(--text-2); }

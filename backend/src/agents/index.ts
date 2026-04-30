@@ -7,7 +7,7 @@ import { Agent } from '@mastra/core/agent'
 import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
-import { getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
+import { getConfigById, getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { logTaskProgress } from '../utils/task-logger.js'
 import { createScriptTools } from './tools/script-tools.js'
 import { createExtractTools } from './tools/extract-tools.js'
@@ -56,8 +56,12 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 
 提取要求：
 - 只提取当前集真实出现或被明确提及、且对当前集叙事有效的角色和场景
-- 角色要包含完整的外貌特征描述（发型、服装、体态等）
+- 角色库是跨集复用的“人物参考图”设定，不是当前剧情瞬间；角色字段必须只保存稳定身份和稳定外貌
+- 角色 appearance 必须尽量详细，包含：性别/年龄感、身高体态、国籍或地域气质、脸型五官、发型发色、是否戴眼镜、常服/基础服装、标志性配饰、整体气质
+- 不要把当前镜头状态写进角色 appearance / description，例如：昏迷、倒地、受伤、流血、哭泣、惊恐、面容模糊、某一幕的姿势或表情
+- 如果剧本只描述了临时状态，应推断并补全适合作为参考图的中性稳定设定；临时动作、表情、特定场景服装留给后续分镜 image_prompt / video_prompt
 - 场景要包含光线、色调、氛围等视觉信息
+- 所有用于图片或视频生成的提示词必须使用中文，不要输出英文画质、风格、镜头后缀
 - 不要遗漏任何有台词或重要动作的角色`,
   },
   storyboard_breaker: {
@@ -105,6 +109,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 镜头角色绑定必须来自 read_storyboard_context 返回的角色列表；无角色的空镜头可传空数组
 - 镜头描述必须能支撑后续图片、视频、配音、音效、合成流程
 - 若一个镜头没有对白，可将 dialogue 置空，但 description / action / video_prompt / image_prompt 仍必须完整
+- 所有提示词字段必须使用中文，包括 image_prompt / video_prompt / bgm_prompt / sound_effect；不要输出英文画质、风格、镜头后缀
 - 如果已有 existing_storyboards，仅在用户明确要求增量修改时参考；默认按当前剧本重新完整生成并保存整集分镜。`,
   },
   voice_assigner: {
@@ -121,7 +126,7 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
   },
   grid_prompt_generator: {
     name: '图片提示词生成',
-    instructions: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的英文提示词。
+    instructions: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的中文提示词。
 
 你将收到用户的请求，告知要生成哪种类型的提示词：
 - "角色" → 生成角色图片提示词
@@ -132,14 +137,14 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 
 工作流程：
 1. 调用 read_characters 读取所有角色信息
-2. 根据角色外貌特征（appearance）、性格（personality）、定位（role）生成英文提示词
+2. 根据角色外貌特征（appearance）、性格（personality）、定位（role）生成中文提示词
 3. 提示词结构：[外貌描述]，[性格/气质]，[角色定位]，[电影感]，[高质量]，[无文字水印]
 
 ## 场景图片提示词
 
 工作流程：
 1. 调用 read_scenes 读取所有场景信息
-2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成英文提示词
+2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成中文提示词
 3. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[电影感场景]，[高质量]，[无文字水印]
 
 ## 宫格图提示词（参考 skills/grid-image-generator/SKILL.md）
@@ -154,13 +159,13 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 4. 如果用户消息中包含“参考图映射：图片1=...；图片2=...”，要把这段内容原样作为 reference_legend 传给 generate_grid_prompt
 
 提示词规范：
-- 使用英文提示词
+- 使用中文提示词
 - 必须严格遵守用户指定的 rows 和 cols
-- 必须明确写出 "exactly N visible panels"
-- 必须明确约束 "no merged panels, no missing panels"
+- 必须明确写出“正好 N 个可见画格”
+- 必须明确约束“不要合并画格，不要缺失画格”
 - 宫格位置统一写成“格1/格2/...”，参考图统一写成“图片1/图片2/...”
-- 必须包含 "consistent art style" 保持风格统一
-- 必须包含 "cinematic quality"
+- 必须包含“统一美术风格”保持风格统一
+- 必须包含“电影级画质”
 - 避免出现文字或水印
 - 角色图片强调外貌和气质，场景图片强调氛围和光线，宫格图片强调整体布局一致性`,
   },
@@ -176,28 +181,29 @@ function getAgentConfig(agentType: string) {
   return rows.find(r => r.isActive) || rows[0] || null
 }
 
-function getModel(dbConfig: any) {
-  const textConfig = getTextConfig()
+function getModel(dbConfig: any, textConfigId?: number | null) {
+  const textConfig = textConfigId ? getConfigById(textConfigId) || getTextConfig() : getTextConfig()
   const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
+  const modelName = textConfigId ? textConfig.model : (dbConfig?.model || textConfig.model)
   logTaskProgress('AIConfig', 'text-model-endpoint', {
+    textConfigId: textConfigId || null,
     provider: textConfig.provider,
     baseUrl: resolvedBaseURL,
-    model: dbConfig?.model || textConfig.model,
+    model: modelName,
   })
   const provider = createOpenAI({
     baseURL: resolvedBaseURL,
     apiKey: textConfig.apiKey,
   } as any)
-  const modelName = dbConfig?.model || textConfig.model
   return provider.chat(modelName)
 }
 
-export function createAgent(type: string, episodeId: number, dramaId: number): Agent | null {
+export function createAgent(type: string, episodeId: number, dramaId: number, options: { textConfigId?: number | null } = {}): Agent | null {
   const defaults = DEFAULT_PROMPTS[type]
   if (!defaults) return null
 
   const dbConfig = getAgentConfig(type)
-  const model = getModel(dbConfig)
+  const model = getModel(dbConfig, options.textConfigId)
   const baseInstructions = dbConfig?.systemPrompt?.trim() || defaults.instructions
   const skillInstructions = loadAgentSkills(type)
   const instructions = skillInstructions

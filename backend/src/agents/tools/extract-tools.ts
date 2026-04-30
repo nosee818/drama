@@ -14,6 +14,34 @@ import { eq, and } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
 
+const transientCharacterStates = [
+  '昏迷',
+  '面容模糊',
+  '脸部模糊',
+  '五官模糊',
+  '倒地',
+  '躺在',
+  '受伤',
+  '流血',
+  '惊恐',
+  '哭泣',
+  '虚弱',
+]
+
+function looksEpisodic(value?: string | null) {
+  const text = String(value || '')
+  return transientCharacterStates.some(word => text.includes(word))
+}
+
+function mergeStableField(next?: string | null, current?: string | null) {
+  const incoming = String(next || '').trim()
+  const existing = String(current || '').trim()
+  if (!incoming) return existing
+  if (looksEpisodic(incoming)) return existing || incoming
+  if (existing && existing.length >= incoming.length) return existing
+  return incoming
+}
+
 // ─── 关联辅助 ────────────────────────────────────────────────
 function linkCharToEpisode(episodeId: number, characterId: number) {
   const ts = now()
@@ -143,9 +171,9 @@ export function createExtractTools(episodeId: number, dramaId: number) {
           // 已存在：合并信息，保留 ID
           db.update(schema.characters).set({
             role: char.role || existing.role,
-            description: char.description || existing.description,
-            appearance: char.appearance || existing.appearance,
-            personality: char.personality || existing.personality,
+            description: mergeStableField(char.description, existing.description),
+            appearance: mergeStableField(char.appearance, existing.appearance),
+            personality: mergeStableField(char.personality, existing.personality),
             updatedAt: ts,
           }).where(eq(schema.characters.id, existing.id)).run()
           linkCharToEpisode(episodeId, existing.id)

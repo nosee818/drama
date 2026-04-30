@@ -139,6 +139,15 @@
             </div>
             <div class="toolbar-right">
               <span v-if="scriptLen" class="char-count">{{ scriptLen }} 字</span>
+              <BaseSelect
+                v-if="textConfigSelectOptions.length"
+                v-model="selectedStoryboardTextConfigId"
+                :options="textConfigSelectOptions"
+                placeholder="选择语言模型"
+                searchable
+                style="width:280px"
+              />
+              <span v-else class="locked-config">语言模型 · 未配置</span>
               <button v-if="rawContent" class="btn btn-sm" @click="skipRewrite">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/><path d="M13 18l6-6-6-6"/></svg>
                 跳过改写
@@ -283,8 +292,12 @@
               </div>
             </div>
             <div class="toolbar-right">
+              <span v-if="audioSkipped" class="tag tag-success">已跳过音频</span>
               <span v-if="charsVoiced" class="char-count">{{ charsVoiced }}/{{ chars.length }} 已分配</span>
               <span v-if="voiceSampleCount" class="char-count">{{ voiceSampleCount }}/{{ charsVoiced }} 试听文件</span>
+              <button class="btn btn-sm" @click="audioSkipped ? resumeAudio() : skipAudio()">
+                {{ audioSkipped ? '恢复音频' : '跳过音频' }}
+              </button>
               <button v-if="charsVoiced" class="btn btn-sm" @click="doVoice" :disabled="rn">
                 <Loader2 v-if="rn && rt === 'voice_assigner'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
@@ -297,7 +310,18 @@
             </div>
           </div>
 
-          <div v-if="!charsVoiced && !rn" class="step-empty">
+          <div v-if="audioSkipped && !rn" class="step-empty">
+            <div class="empty-visual">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 4l16 16"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-.78 3.22"/><path d="M5 10v2a7 7 0 0 0 9 6.71"/></svg>
+            </div>
+            <div class="empty-title">已跳过音色与配音</div>
+            <div class="empty-desc">当前项目将继续分镜、图片、视频和合成流程，合成时不会强制生成 TTS 音频。</div>
+            <div class="step-empty-actions">
+              <button class="btn btn-primary" @click="scriptStep = 4">继续分镜</button>
+              <button class="btn" @click="resumeAudio">恢复音频流程</button>
+            </div>
+          </div>
+          <div v-else-if="!charsVoiced && !rn" class="step-empty">
             <div class="empty-visual">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
             </div>
@@ -307,6 +331,7 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               AI 自动分配
             </button>
+            <button class="btn" @click="skipAudio">跳过音色与配音</button>
           </div>
           <div v-else-if="rn && rt === 'voice_assigner'" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
@@ -414,9 +439,15 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 添加
               </button>
-              <template v-if="!sbs.length">
-                <span class="locked-config">视频模型 · {{ lockedVideoConfigLabel }}</span>
-              </template>
+              <BaseSelect
+                v-if="textConfigSelectOptions.length"
+                v-model="selectedStoryboardTextConfigId"
+                :options="textConfigSelectOptions"
+                placeholder="选择语言模型"
+                searchable
+                style="width:280px"
+              />
+              <span v-else class="locked-config">语言模型 · 未配置</span>
               <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
                 <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -692,7 +723,18 @@
             </div>
             <div class="empty-title">将剧本拆解为分镜序列</div>
             <div class="empty-desc">AI 自动分析剧本，生成镜头列表和视频提示词</div>
-            <div class="locked-config-banner">当前集视频模型：{{ lockedVideoConfigLabel }}</div>
+            <div class="storyboard-model-picker">
+              <span class="model-picker-label">语言模型</span>
+              <BaseSelect
+                v-if="textConfigSelectOptions.length"
+                v-model="selectedStoryboardTextConfigId"
+                :options="textConfigSelectOptions"
+                placeholder="选择语言模型"
+                searchable
+                style="width:320px"
+              />
+              <span v-else class="locked-config">语言模型 · 未配置</span>
+            </div>
             <button class="btn btn-primary" @click="doBreakdown">
               <Loader2 v-if="rt === 'storyboard_breaker'" :size="13" class="animate-spin" />
               <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -767,6 +809,16 @@
                 <div class="asset-body">
                   <div class="asset-name">{{ c.name }}</div>
                   <div class="asset-meta dim">{{ c.role || '角色' }}</div>
+                  <label class="prompt-edit-block">
+                    <span>角色图片提示词</span>
+                    <textarea
+                      :value="c.appearance || c.description || ''"
+                      class="mini-textarea"
+                      rows="4"
+                      placeholder="描述外貌、服装、气质、镜头风格..."
+                      @blur="updateCharacterPrompt(c, $event.target.value)"
+                    />
+                  </label>
                 </div>
                 <div class="asset-foot">
                   <span :class="['dot', (c.image_url || c.imageUrl) && 'ok', isPendingCharImage(c.id) && 'pending']" />
@@ -806,6 +858,16 @@
                 <div class="asset-body">
                   <div class="asset-name">{{ s.location }}</div>
                   <div class="asset-meta dim">{{ s.time || '—' }}</div>
+                  <label class="prompt-edit-block">
+                    <span>场景图片提示词</span>
+                    <textarea
+                      :value="s.prompt || ''"
+                      class="mini-textarea"
+                      rows="4"
+                      placeholder="描述空间、光线、色调、氛围、构图..."
+                      @blur="updateScenePrompt(s, $event.target.value)"
+                    />
+                  </label>
                 </div>
                 <div class="asset-foot">
                   <span :class="['dot', (s.image_url || s.imageUrl) && 'ok', isPendingSceneImage(s.id) && 'pending']" />
@@ -820,17 +882,27 @@
           <div v-else-if="prodTab === 'dubbing'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ ttsEligibleCount }} 条可生成配音</span>
-              <span class="tag mono">{{ ttsGeneratedCount }}/{{ ttsEligibleCount }} 已生成</span>
+              <span class="tag mono">{{ audioSkipped ? '已跳过' : `${ttsGeneratedCount}/${ttsEligibleCount} 已生成` }}</span>
               <span class="tag">{{ lockedAudioConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchShotTTS">
+                <button class="btn btn-sm" @click="audioSkipped ? resumeAudio() : skipAudio()">{{ audioSkipped ? '恢复配音' : '跳过配音' }}</button>
+                <button class="btn btn-sm" :disabled="audioSkipped" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
                   批量生成
                 </button>
               </div>
             </div>
 
-            <div v-if="!ttsEligibleCount" class="step-empty" style="min-height:260px">
+            <div v-if="audioSkipped" class="step-empty" style="min-height:260px">
+              <div class="empty-visual">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 4l16 16"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-.78 3.22"/><path d="M5 10v2a7 7 0 0 0 9 6.71"/></svg>
+              </div>
+              <div class="empty-title">配音生成已跳过</div>
+              <div class="empty-desc">可以直接继续镜头图片、视频生成和合成。恢复后可重新生成配音。</div>
+              <button class="btn" @click="resumeAudio">恢复配音</button>
+            </div>
+
+            <div v-else-if="!ttsEligibleCount" class="step-empty" style="min-height:260px">
               <div class="empty-visual">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
               </div>
@@ -1001,7 +1073,7 @@
             </div>
 
             <!-- Grid Tool Dialog -->
-            <div v-if="gridDialog" class="overlay" @click.self="gridDialog = false">
+            <div v-if="gridDialog" class="overlay">
               <div class="card grid-tool">
                 <div class="grid-tool-head">
                   <span style="font-size:15px;font-weight:600;font-family:var(--font-display)">宫格图工具</span>
@@ -1226,6 +1298,16 @@
                 <div class="prod-info">
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
                   <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
+                  <label class="prompt-edit-block">
+                    <span>镜头图片提示词</span>
+                    <textarea
+                      :value="sb.image_prompt || sb.imagePrompt || sb.description || ''"
+                      class="mini-textarea"
+                      rows="4"
+                      placeholder="用于首帧、尾帧和镜头图..."
+                      @blur="updateField(sb, 'image_prompt', $event.target.value)"
+                    />
+                  </label>
                   <div class="prod-dots">
                     <span :class="['dot', hasImg(sb) && 'ok']" /><span style="font-size:10px">图</span>
                     <span :class="['dot', hasVid(sb) && 'ok', isPendingVideo(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingVideo(sb.id) ? '视频生成中' : '视频' }}</span>
@@ -1288,6 +1370,16 @@
                 <div class="prod-info">
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
                   <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
+                  <label class="prompt-edit-block">
+                    <span>视频生成提示词</span>
+                    <textarea
+                      :value="sb.video_prompt || sb.videoPrompt || ''"
+                      class="mini-textarea"
+                      rows="4"
+                      placeholder="描述动作、镜头运动和时间节奏..."
+                      @blur="updateField(sb, 'video_prompt', $event.target.value)"
+                    />
+                  </label>
                   <div class="prod-dots">
                     <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">视频</span>
                     <span :class="['dot', hasTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
@@ -1464,6 +1556,10 @@ const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.vo
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+const audioSkipped = ref(false)
+const audioSkipStorageKey = computed(() => `huobao:skip-audio:${dramaId}:${episodeNumber}`)
+const voiceStepDone = computed(() => !!chars.value.length && (audioSkipped.value || charsVoiced.value === chars.value.length))
+const dubbingStepDone = computed(() => audioSkipped.value || !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
 
 const scriptStep = ref(0)
 const prodTab = ref('chars')
@@ -1482,6 +1578,12 @@ const fallbackVoiceProfiles = [
 ]
 const voiceProfiles = ref(fallbackVoiceProfiles)
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
+const textConfigSelectOptions = computed(() => textConfigs.value
+  .filter(c => c.is_active !== false)
+  .map(c => ({
+    label: `${configLabel(c)}${defaultTextConfig.value?.id === c.id ? ' · 默认' : ''}`,
+    value: c.id,
+  })))
 const videoConfigSelectOptions = computed(() => videoConfigs.value.map(c => {
   let modelName = ''
   try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
@@ -1496,6 +1598,7 @@ const gridLayoutOptions = [
   { label: '5x5', value: '5x5' },
 ]
 const imageConfigs = ref([])
+const textConfigs = ref([])
 const videoConfigs = ref([])
 const audioConfigs = ref([])
 const pendingCharImageIds = ref([])
@@ -1506,12 +1609,36 @@ const pendingComposeIds = ref([])
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
 const imageViewer = ref({ open: false, src: '', title: '' })
+const selectedStoryboardTextConfigId = ref(null)
+const storyboardTextConfigStorageKey = computed(() => `huobao:storyboard-text-config:${dramaId}:${episodeNumber}`)
+
+function parseMetadata(value) {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try { return JSON.parse(value) || {} } catch { return {} }
+}
+
+function dramaTextDefaultConfigId() {
+  return parseMetadata(drama.value?.metadata).ai_defaults?.text_config_id || null
+}
 
 function configLabel(config) {
   if (!config) return '未配置'
   let modelName = ''
   try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
   return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
+}
+
+function preferredConfig(configs, lockedId) {
+  if (!Array.isArray(configs) || !configs.length) return null
+  const locked = lockedId ? configs.find(c => c.id === lockedId) : null
+  if (locked) return locked
+  return [...configs]
+    .filter(c => c.is_active !== false)
+    .sort((a, b) => {
+      if (!!a.is_default !== !!b.is_default) return a.is_default ? -1 : 1
+      return (Number(b.priority) || 0) - (Number(a.priority) || 0)
+    })[0] || configs[0]
 }
 
 function isPendingCharImage(id) {
@@ -1528,15 +1655,54 @@ function closeImageViewer() {
 }
 
 function handleImageViewerKeydown(event) {
-  if (event.key === 'Escape' && imageViewer.value.open) closeImageViewer()
+  if (event.key !== 'Escape') return
+  if (imageViewer.value.open) closeImageViewer()
+  else if (gridDialog.value) gridDialog.value = false
+}
+
+function restoreStoryboardTextConfigSelection() {
+  if (typeof window === 'undefined') return
+  const defaultId = Number(dramaTextDefaultConfigId())
+  if (defaultId) {
+    selectedStoryboardTextConfigId.value = defaultId
+    return
+  }
+  const raw = window.localStorage.getItem(storyboardTextConfigStorageKey.value)
+  if (!raw) return
+  const id = Number(raw)
+  if (id) selectedStoryboardTextConfigId.value = id
+}
+
+function ensureStoryboardTextConfigSelection() {
+  if (!textConfigs.value.length) return
+  const defaultId = Number(dramaTextDefaultConfigId())
+  const projectDefault = defaultId ? textConfigs.value.find(c => c.id === defaultId && c.is_active !== false) : null
+  if (projectDefault && selectedStoryboardTextConfigId.value !== projectDefault.id) {
+    selectedStoryboardTextConfigId.value = projectDefault.id
+    return
+  }
+  const selected = selectedStoryboardTextConfigId.value
+    ? textConfigs.value.find(c => c.id === selectedStoryboardTextConfigId.value && c.is_active !== false)
+    : null
+  if (!selected) {
+    selectedStoryboardTextConfigId.value = projectDefault?.id || defaultTextConfig.value?.id || null
+  }
 }
 
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
+  restoreStoryboardTextConfigSelection()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleImageViewerKeydown)
+})
+
+watch(textConfigs, ensureStoryboardTextConfigSelection, { deep: true })
+watch(selectedStoryboardTextConfigId, (value) => {
+  if (typeof window === 'undefined') return
+  if (value) window.localStorage.setItem(storyboardTextConfigStorageKey.value, String(value))
+  else window.localStorage.removeItem(storyboardTextConfigStorageKey.value)
 })
 
 function isPendingSceneImage(id) {
@@ -1574,13 +1740,24 @@ function isNarratorCharacter(char) {
 
 const visualChars = computed(() => chars.value.filter(c => !isNarratorCharacter(c)))
 
+const defaultTextConfig = computed(() => preferredConfig(textConfigs.value, null))
+const activeStoryboardTextConfig = computed(() => {
+  const selected = selectedStoryboardTextConfigId.value
+    ? textConfigs.value.find(c => c.id === selectedStoryboardTextConfigId.value)
+    : null
+  return selected || defaultTextConfig.value
+})
+const activeStoryboardTextConfigLabel = computed(() => configLabel(activeStoryboardTextConfig.value))
 const lockedImageConfigId = computed(() => episode.value?.image_config_id || episode.value?.imageConfigId || null)
 const lockedVideoConfigId = computed(() => episode.value?.video_config_id || episode.value?.videoConfigId || null)
 const lockedAudioConfigId = computed(() => episode.value?.audio_config_id || episode.value?.audioConfigId || null)
 const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)?.provider || '')
-const lockedImageConfigLabel = computed(() => configLabel(imageConfigs.value.find(c => c.id === lockedImageConfigId.value)))
-const lockedVideoConfigLabel = computed(() => configLabel(videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)))
-const lockedAudioConfigLabel = computed(() => configLabel(audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)))
+const activeImageConfig = computed(() => preferredConfig(imageConfigs.value, lockedImageConfigId.value))
+const activeVideoConfig = computed(() => preferredConfig(videoConfigs.value, lockedVideoConfigId.value))
+const activeAudioConfig = computed(() => preferredConfig(audioConfigs.value, lockedAudioConfigId.value))
+const lockedImageConfigLabel = computed(() => configLabel(activeImageConfig.value))
+const lockedVideoConfigLabel = computed(() => configLabel(activeVideoConfig.value))
+const lockedAudioConfigLabel = computed(() => configLabel(activeAudioConfig.value))
 
 // Grid tool state
 const gridDialog = ref(false)
@@ -1755,7 +1932,7 @@ const gridBlankStyle = computed(() => {
 function prodStepDone(id) {
   if (id === 'chars') return !visualCharTotal.value || charImgCount.value === visualCharTotal.value
   if (id === 'scenes') return !!scenes.value.length && sceneImgCount.value === scenes.value.length
-  if (id === 'dubbing') return !!sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)
+  if (id === 'dubbing') return !!sbs.value.length && dubbingStepDone.value
   if (id === 'shots') return !!sbs.value.length && shotImgCount.value === sbs.value.length
   if (id === 'videos') return !!sbs.value.length && shotVidCount.value === sbs.value.length
   if (id === 'compose') return !!sbs.value.length && composedCount.value === sbs.value.length
@@ -1781,7 +1958,7 @@ const canGoNext = computed(() => {
   if (scriptStep.value === 0) return !!localRaw.value.trim()
   if (scriptStep.value === 1) return !!localScript.value.trim() || !!scriptContent.value
   if (scriptStep.value === 2) return chars.value.length > 0
-  if (scriptStep.value === 3) return charsVoiced.value > 0
+  if (scriptStep.value === 3) return voiceStepDone.value
   if (scriptStep.value === 4) return sbs.value.length > 0
   return false
 })
@@ -2104,7 +2281,7 @@ const sidebarSections = computed(() => ([
       { key: 'script:raw', label: '原始内容', desc: '', icon: FileText, done: !!rawContent.value },
       { key: 'script:rewrite', label: 'AI 改写', desc: '', icon: FileText, done: !!scriptContent.value },
       { key: 'script:extract', label: '提取', desc: '', icon: Users, done: !!chars.value.length },
-      { key: 'script:voice', label: '音色', desc: '', icon: Mic2, done: !!chars.value.length && charsVoiced.value === chars.value.length },
+      { key: 'script:voice', label: '音色', desc: '', icon: Mic2, done: voiceStepDone.value },
       { key: 'script:storyboard', label: '分镜', desc: '', icon: Clapperboard, done: !!sbs.value.length },
     ],
   },
@@ -2142,14 +2319,14 @@ const activeMainStage = computed(() => {
 function mainStageDone(stageId) {
   if (stageId === 'script') return !!scriptContent.value
   if (stageId === 'assets') {
-    const charsReady = !!chars.value.length && charsVoiced.value === chars.value.length
+    const charsReady = voiceStepDone.value
     const charImagesReady = !visualCharTotal.value || charImgCount.value === visualCharTotal.value
     const sceneImagesReady = !scenes.value.length || sceneImgCount.value === scenes.value.length
     return charsReady && charImagesReady && sceneImagesReady
   }
   if (stageId === 'storyboard') {
     if (!sbs.value.length) return false
-    const ttsReady = !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value
+    const ttsReady = dubbingStepDone.value
     return ttsReady
       && shotImgCount.value === sbs.value.length
       && shotVidCount.value === sbs.value.length
@@ -2200,7 +2377,7 @@ const activeSubSteps = computed(() => {
   if (activeMainStage.value === 'assets') {
     return [
       { key: 'script:extract', label: '提取角色场景', done: !!chars.value.length },
-      { key: 'script:voice', label: '分配音色', done: !!chars.value.length && charsVoiced.value === chars.value.length },
+      { key: 'script:voice', label: '分配音色', done: voiceStepDone.value },
       { key: 'prod:chars', label: '角色形象', done: !visualCharTotal.value || charImgCount.value === visualCharTotal.value },
       { key: 'prod:scenes', label: '场景图片', done: !scenes.value.length || sceneImgCount.value === scenes.value.length },
     ]
@@ -2208,7 +2385,7 @@ const activeSubSteps = computed(() => {
   if (activeMainStage.value === 'storyboard') {
     return [
       { key: 'script:storyboard', label: '分镜拆解', done: !!sbs.value.length },
-      { key: 'prod:dubbing', label: '配音生成', done: !ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value },
+      { key: 'prod:dubbing', label: '配音生成', done: dubbingStepDone.value },
       { key: 'prod:shots', label: '镜头图片', done: !!sbs.value.length && shotImgCount.value === sbs.value.length },
       { key: 'prod:videos', label: '视频生成', done: !!sbs.value.length && shotVidCount.value === sbs.value.length },
       { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
@@ -2242,7 +2419,7 @@ const bubbleSteps = computed(() => {
       { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
       { key: 'script:rewrite', label: 'AI 改写', done: !!scriptContent.value },
       { key: 'script:extract', label: '提取', done: !!chars.value.length },
-      { key: 'script:voice', label: '音色', done: !!chars.value.length && charsVoiced.value === chars.value.length },
+      { key: 'script:voice', label: '音色', done: voiceStepDone.value },
       { key: 'script:storyboard', label: '分镜', done: !!sbs.value.length },
     ]
   }
@@ -2290,9 +2467,9 @@ const pipelineProgress = computed(() => {
   if (rawContent.value) p++
   if (scriptContent.value) p++
   if (chars.value.length) p++
-  if (charsVoiced.value) p++
+  if (voiceStepDone.value) p++
   if (sbs.value.length) p++
-  if (sbs.value.length && (!ttsEligibleCount.value || ttsGeneratedCount.value === ttsEligibleCount.value)) p++
+  if (sbs.value.length && dubbingStepDone.value) p++
   if (sbs.value.some(s => s.composed_image || s.composedImage)) p++
   if (sbs.value.some(s => s.video_url || s.videoUrl)) p++
   if (sbs.value.length && composedCount.value === sbs.value.length) p++
@@ -2327,6 +2504,53 @@ function updateCharVoice(charId, voiceId) {
     c.voice_sample_url = ''
     c.voiceSampleUrl = ''
   }
+}
+
+async function updateCharacterPrompt(char, value) {
+  const next = String(value || '').trim()
+  const current = String(char.appearance || char.description || '').trim()
+  if (next === current) return
+  char.appearance = next
+  char.appearancePrompt = next
+  try {
+    await characterAPI.update(char.id, { appearance: next })
+    toast.success('角色提示词已保存')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function updateScenePrompt(scene, value) {
+  const next = String(value || '').trim()
+  const current = String(scene.prompt || '').trim()
+  if (next === current) return
+  scene.prompt = next
+  try {
+    await sceneAPI.update(scene.id, { prompt: next })
+    toast.success('场景提示词已保存')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+function persistAudioSkip() {
+  if (typeof window === 'undefined') return
+  if (audioSkipped.value) window.localStorage.setItem(audioSkipStorageKey.value, '1')
+  else window.localStorage.removeItem(audioSkipStorageKey.value)
+}
+function restoreAudioSkip() {
+  if (typeof window === 'undefined') return
+  audioSkipped.value = window.localStorage.getItem(audioSkipStorageKey.value) === '1'
+}
+function skipAudio() {
+  audioSkipped.value = true
+  persistAudioSkip()
+  toast.success('已跳过音色与配音流程')
+}
+function resumeAudio() {
+  audioSkipped.value = false
+  persistAudioSkip()
+  toast.info('已恢复音频流程')
 }
 function getVoiceProfile(voiceId) {
   return voiceProfiles.value.find(v => v.id === voiceId) || null
@@ -2395,7 +2619,7 @@ async function deleteShot(sb) {
 const scriptSteps = computed(() => {
   const hasScript = !!scriptContent.value
   const hasChars = chars.value.length > 0 && hasScript
-  const hasVoice = charsVoiced.value > 0 && hasChars
+  const hasVoice = voiceStepDone.value && hasChars
   const hasSbs = sbs.value.length > 0
   return [
     { label: '原始内容', state: rawContent.value ? 'done' : 'active', spinning: false },
@@ -2412,6 +2636,7 @@ watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 async function refresh() {
   try {
     drama.value = await dramaAPI.get(dramaId)
+    ensureStoryboardTextConfigSelection()
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
@@ -2425,7 +2650,7 @@ async function refresh() {
       const epHasSbs = sbs.value.length > 0
 
       if (epHasSbs) scriptStep.value = 4
-      else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
+      else if (epHasScript && (audioSkipped.value || chars.value.some(c => c.voice_style || c.voiceStyle))) scriptStep.value = 3
       else if (epHasScript && chars.value.length) scriptStep.value = 2
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
@@ -2439,7 +2664,18 @@ async function refresh() {
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
-function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
+function doRewrite() {
+  const cfg = activeStoryboardTextConfig.value
+  saveRaw()
+  runAgent(
+    'script_rewriter',
+    `请读取剧本并改写为格式化剧本，然后保存。语言模型：${cfg ? configLabel(cfg) : '默认语言模型'}。`,
+    dramaId,
+    epId.value,
+    refresh,
+    { textConfigId: cfg?.id || null },
+  )
+}
 function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
   if (!raw) {
@@ -2452,8 +2688,16 @@ function skipRewrite() {
   scriptStep.value = 2
 }
 function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, refresh) }
-function doVoice() { runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh) }
+function doVoice() {
+  audioSkipped.value = false
+  persistAudioSkip()
+  runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh)
+}
 async function batchGenSamples() {
+  if (audioSkipped.value) {
+    toast.info('当前已跳过音频流程')
+    return
+  }
   const pending = chars.value.filter(c => (c.voice_style || c.voiceStyle) && !(c.voice_sample_url || c.voiceSampleUrl))
   if (!pending.length) {
     toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
@@ -2467,9 +2711,16 @@ async function batchGenSamples() {
   await refresh()
 }
 function doBreakdown() {
-  const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
-  const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
-  runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
+  const cfg = activeStoryboardTextConfig.value
+  const label = cfg ? configLabel(cfg) : '默认语言模型'
+  runAgent(
+    'storyboard_breaker',
+    `请使用当前语言模型拆解分镜并生成中文视频提示词。语言模型：${label}。请保持镜头连续、时长合理，并为后续图片和视频生成补全中文提示词。`,
+    dramaId,
+    epId.value,
+    refresh,
+    { textConfigId: cfg?.id || null },
+  )
 }
 async function genSample(id) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e.message) } }
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
@@ -2485,6 +2736,27 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
       await refresh()
       if (check()) return
     }
+  })()
+}
+
+function watchImageGeneration(genId, onDone, onFailed, attempts = 120, delay = 3000) {
+  void (async () => {
+    for (let i = 0; i < attempts; i++) {
+      await sleep(delay)
+      try {
+        const row = await imageAPI.get(genId)
+        if (row?.status === 'completed') {
+          await refresh()
+          onDone?.(row)
+          return
+        }
+        if (row?.status === 'failed') {
+          onFailed?.(row)
+          return
+        }
+      } catch {}
+    }
+    onFailed?.({ error_msg: '生成超时，请检查后端或 ComfyUI 日志' })
   })()
 }
 
@@ -2526,13 +2798,24 @@ function batchCharImages() {
 async function genSceneImg(id) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
-    await sceneAPI.generateImage(id, epId.value)
+    const res = await sceneAPI.generateImage(id, epId.value)
     toast.success('场景图片生成中')
     await refresh()
+    const finishPending = () => {
+      pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+    }
+    if (res?.image_generation_id) {
+      watchImageGeneration(res.image_generation_id, finishPending, (row) => {
+        finishPending()
+        toast.error(row?.error_msg || row?.errorMsg || '场景图片生成失败')
+        refresh()
+      })
+      return
+    }
     watchAsyncResult(() => {
       const scene = scenes.value.find(s => s.id === id)
       const done = !!(scene?.image_url || scene?.imageUrl)
-      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
+      if (done) finishPending()
       return done
     })
   } catch (e) {
@@ -2587,6 +2870,10 @@ function getDialogueSpeaker(sb) {
   return speaker
 }
 async function genShotTTS(sb) {
+  if (audioSkipped.value) {
+    toast.info('当前已跳过配音生成')
+    return
+  }
   try {
     await storyboardAPI.generateTTS(sb.id)
     toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
@@ -2594,6 +2881,10 @@ async function genShotTTS(sb) {
   } catch (e) { toast.error(e.message) }
 }
 async function batchShotTTS() {
+  if (audioSkipped.value) {
+    toast.info('当前已跳过配音生成')
+    return
+  }
   const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
   if (!pending.length) {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
@@ -2680,6 +2971,7 @@ async function genShotFrame(sb, frameType) {
       drama_id: dramaId,
       prompt,
       frame_type: frameType,
+      config_id: activeImageConfig.value?.id,
       reference_images: referenceImages.length ? referenceImages : undefined,
     }
     await imageAPI.generate(body)
@@ -2846,11 +3138,13 @@ function getRefs(sb) {
 
 async function loadConfigs() {
   try {
-    const [imgCfgs, vidCfgs, audCfgs] = await Promise.all([
+    const [txtCfgs, imgCfgs, vidCfgs, audCfgs] = await Promise.all([
+      aiConfigAPI.list('text'),
       aiConfigAPI.list('image'),
       aiConfigAPI.list('video'),
       aiConfigAPI.list('audio'),
     ])
+    textConfigs.value = txtCfgs || []
     imageConfigs.value = imgCfgs || []
     videoConfigs.value = vidCfgs || []
     audioConfigs.value = audCfgs || []
@@ -2887,7 +3181,7 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-onMounted(() => { refresh(); loadConfigs(); loadVoices() })
+onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 </script>
 
 <style scoped>
@@ -3574,6 +3868,17 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
   font-size: 12px;
   color: var(--text-2);
 }
+.storyboard-model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.model-picker-label {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 700;
+}
 .role-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .role-pill {
   height: 32px;
@@ -3656,6 +3961,37 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .asset-body { padding: 8px 10px; }
 .asset-name { font-size: 13px; font-weight: 600; }
 .asset-meta { font-size: 11px; }
+.prompt-edit-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.prompt-edit-block span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.mini-textarea {
+  width: 100%;
+  min-height: 78px;
+  resize: vertical;
+  border: 1px solid rgba(27, 41, 64, 0.12);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.7);
+  color: var(--text-1);
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 8px 9px;
+  outline: none;
+  transition: border-color 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out);
+}
+.mini-textarea:focus {
+  border-color: rgba(78, 112, 255, 0.48);
+  box-shadow: 0 0 0 3px rgba(78, 112, 255, 0.10);
+}
 .asset-foot { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
 
 /* Frame grid */

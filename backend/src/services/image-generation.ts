@@ -5,6 +5,7 @@ import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../utils/storage.js'
 import { getImageAdapter } from './adapters/registry'
 import type { AIConfig } from './adapters/types'
+import { configForComfyUITask, encodeComfyUITaskId, isComfyUIProvider, selectComfyUIConfig } from './adapters/comfyui-lb'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 interface GenerateImageParams {
@@ -71,6 +72,7 @@ export async function generateImage(params: GenerateImageParams): Promise<number
 
 async function processImageGeneration(id: number, config: AIConfig) {
   const adapter = getImageAdapter(config.provider)
+  const requestConfig = isComfyUIProvider(config.provider) ? selectComfyUIConfig(config) : config
 
   try {
     const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
@@ -87,7 +89,7 @@ async function processImageGeneration(id: number, config: AIConfig) {
 
     // 使用 Adapter 构建请求
     const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages)
-    const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
+    const { url, method, headers, body } = adapter.buildGenerateRequest(requestConfig, {
       id: record.id,
       model: record.model,
       prompt: record.prompt,
@@ -125,7 +127,10 @@ async function processImageGeneration(id: number, config: AIConfig) {
       result,
     })
 
-    const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
+    let { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
+    if (isAsync && taskId && isComfyUIProvider(config.provider)) {
+      taskId = encodeComfyUITaskId(taskId, requestConfig.baseUrl)
+    }
 
     if (!isAsync && imageUrl) {
       logTaskProgress('ImageTask', 'sync-complete', { id, imageUrl })
@@ -201,6 +206,9 @@ async function normalizeReferenceImages(raw: string | null | undefined): Promise
 
 async function pollImageTask(id: number, config: AIConfig, taskId: string) {
   const adapter = getImageAdapter(config.provider)
+  const pollTarget = isComfyUIProvider(config.provider)
+    ? configForComfyUITask(config, taskId)
+    : { config, taskId }
   const startedAt = Date.now()
   const maxDurationMs = 600_000
 
@@ -223,10 +231,10 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
       return
     }
     try {
-      const { url, method, headers } = adapter.buildPollRequest(config, taskId)
+      const { url, method, headers } = adapter.buildPollRequest(pollTarget.config, pollTarget.taskId)
       logTaskProgress('ImageTask', 'poll-request', {
         id,
-        taskId,
+        taskId: pollTarget.taskId,
         provider: config.provider,
         method,
         url: redactUrl(url),
@@ -270,7 +278,7 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
           .run()
         return
       }
-      logTaskWarn('ImageTask', 'poll-retry', { id, taskId, attempt: i + 1, error: err.message })
+      logTaskWarn('ImageTask', 'poll-retry', { id, taskId: pollTarget.taskId, attempt: i + 1, error: err.message })
     }
   }
 }

@@ -13,12 +13,19 @@ export interface AIConfig {
   baseUrl: string
   apiKey: string
   model: string
+  endpoint?: string
+  queryEndpoint?: string
+  settings?: Record<string, any>
 }
 
 export function getTextProviderBaseUrl(config: AIConfig) {
   const provider = config.provider.toLowerCase()
 
-  if (provider === 'openai' || provider === 'openrouter' || provider === 'chatfire') {
+  if (config.endpoint) {
+    return joinProviderUrl(config.baseUrl, '', config.endpoint)
+  }
+
+  if (provider === 'openai' || provider === 'openrouter' || provider === 'chatfire' || provider === 'custom') {
     return joinProviderUrl(config.baseUrl, '/v1', '')
   }
 
@@ -33,12 +40,25 @@ export function getTextProviderBaseUrl(config: AIConfig) {
   return config.baseUrl
 }
 
+function parseSettings(value: string | null | undefined): Record<string, any> {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
   const rows = db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.serviceType, serviceType))
     .all()
     .filter(r => r.isActive)
-    .sort((a, b) => (b.priority || 0) - (a.priority || 0)) // 高优先级优先
+    .sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1
+      return (b.priority || 0) - (a.priority || 0)
+    })
 
   const active = rows[0]
   if (!active) {
@@ -53,12 +73,16 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
     provider: active.provider,
     model: models[0] || '',
     priority: active.priority,
+    isDefault: active.isDefault,
   })
   return {
     provider: active.provider || '',
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
     model: models[0] || '',
+    endpoint: active.endpoint || undefined,
+    queryEndpoint: active.queryEndpoint || undefined,
+    settings: parseSettings(active.settings),
   }
 }
 
@@ -101,5 +125,8 @@ export function getConfigById(id: number): AIConfig | null {
     baseUrl: row.baseUrl,
     apiKey: row.apiKey,
     model: models[0] || '',
+    endpoint: row.endpoint || undefined,
+    queryEndpoint: row.queryEndpoint || undefined,
+    settings: parseSettings(row.settings),
   }
 }

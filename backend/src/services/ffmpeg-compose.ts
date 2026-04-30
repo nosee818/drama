@@ -96,10 +96,17 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         const pureDialogue = parsedDialogue.pureText
         if (pureDialogue) {
           logTaskProgress('ComposeTask', 'generate-inline-tts', { storyboardId, voiceId, textPreview: pureDialogue.slice(0, 40) })
-          const ttsPath = await generateTTS({ text: pureDialogue, voice: voiceId, configId: ep?.audioConfigId ?? undefined })
-          audioPath = toAbsPath(ttsPath)
-          db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
-            .where(eq(schema.storyboards.id, storyboardId)).run()
+          try {
+            const ttsPath = await generateTTS({ text: pureDialogue, voice: voiceId, configId: ep?.audioConfigId ?? undefined })
+            audioPath = toAbsPath(ttsPath)
+            db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
+              .where(eq(schema.storyboards.id, storyboardId)).run()
+          } catch (err: any) {
+            logTaskProgress('ComposeTask', 'inline-tts-skipped', {
+              storyboardId,
+              reason: err.message || 'TTS generation failed',
+            })
+          }
         }
       }
     }

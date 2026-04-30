@@ -49,7 +49,46 @@ function viduHeaders(apiKey?: string, withJson = false) {
   return headers
 }
 
-function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string) {
+function normalizeSettings(value: any) {
+  if (!value) return ''
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return ''
+    JSON.parse(trimmed)
+    return trimmed
+  }
+  return JSON.stringify(value)
+}
+
+function splitBaseUrls(baseUrl: string) {
+  return String(baseUrl || '')
+    .split(/[\n,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function clearDefaultForServiceType(serviceType: string, exceptId?: number) {
+  const rows = db.select().from(schema.aiServiceConfigs).all()
+    .filter(row => row.serviceType === serviceType && (!exceptId || row.id !== exceptId))
+  for (const row of rows) {
+    if (row.isDefault) {
+      db.update(schema.aiServiceConfigs).set({ isDefault: false, updatedAt: now() })
+        .where(eq(schema.aiServiceConfigs.id, row.id)).run()
+    }
+  }
+}
+
+function buildTextProbePath(endpoint?: string) {
+  const value = (endpoint || '').trim()
+  if (!value) return '/v1/models'
+  const clean = value.replace(/\/+$/, '')
+  if (/\/models$/i.test(clean)) return clean
+  if (/\/chat\/completions$/i.test(clean)) return clean.replace(/\/chat\/completions$/i, '/models')
+  if (/\/v\d+$/i.test(clean)) return `${clean}/models`
+  return clean
+}
+
+function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string, endpoint?: string) {
   const p = provider.toLowerCase()
   const m = model || ''
 
@@ -114,9 +153,18 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
     }
   }
 
+  if (p.startsWith('comfyui')) {
+    return {
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '', '/system_stats'),
+      headers: bearerHeaders(apiKey),
+      body: undefined,
+    }
+  }
+
   return {
     method: 'GET',
-    url: joinProviderUrl(baseUrl, '', m ? `/${m}` : '/'),
+    url: joinProviderUrl(baseUrl, '', serviceType === 'text' ? buildTextProbePath(endpoint) : (endpoint || '/')),
     headers: bearerHeaders(apiKey),
     body: undefined,
   }
@@ -152,11 +200,17 @@ app.post('/', async (c) => {
     baseUrl: body.base_url || '',
     apiKey: body.api_key || '',
     model: JSON.stringify(body.model || []),
+    endpoint: body.endpoint || '',
+    queryEndpoint: body.query_endpoint || '',
+    settings: normalizeSettings(body.settings),
     priority: body.priority || 0,
+    isDefault: !!body.is_default,
     isActive: true,
     createdAt: ts,
     updatedAt: ts,
   }).run()
+
+  if (body.is_default) clearDefaultForServiceType(body.service_type, Number(res.lastInsertRowid))
 
   const [row] = db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.id, Number(res.lastInsertRowid))).all()
@@ -255,7 +309,9 @@ app.post('/test', async (c) => {
   }
 
   const model = Array.isArray(body.model) ? body.model[0] : body.model
-  const probe = buildProbe(body.service_type, body.provider, body.base_url, model, body.api_key)
+  const baseUrls = splitBaseUrls(body.base_url)
+  const probes = baseUrls.map((baseUrl) => buildProbe(body.service_type, body.provider, baseUrl, model, body.api_key, body.endpoint))
+  const probe = probes[0]
   const probeUrl = redactUrl(probe.url)
 
   logTaskProgress('AIConfig', 'probe-start', {
@@ -266,35 +322,63 @@ app.post('/test', async (c) => {
   })
 
   try {
-    const resp = await fetch(probe.url, {
-      method: probe.method,
-      headers: probe.headers,
-      body: probe.body ? JSON.stringify(probe.body) : undefined,
-    })
-    const text = await resp.text()
-    const reachable = [200, 204, 400, 401, 403].includes(resp.status)
+    const results = []
+    for (const item of probes) {
+      try {
+        const resp = await fetch(item.url, {
+          method: item.method,
+          headers: item.headers,
+          body: item.body ? JSON.stringify(item.body) : undefined,
+          signal: AbortSignal.timeout(8000),
+        })
+        const text = await resp.text()
+        const reachable = [200, 204, 400, 401, 403].includes(resp.status)
+        results.push({
+          ok: resp.ok,
+          reachable,
+          status: resp.status,
+          status_text: resp.statusText,
+          method: item.method,
+          url: redactUrl(item.url),
+          response_preview: text.slice(0, 240),
+        })
+      } catch (error: any) {
+        results.push({
+          ok: false,
+          reachable: false,
+          status: 0,
+          status_text: '',
+          method: item.method,
+          url: redactUrl(item.url),
+          response_preview: error.message || '请求失败',
+        })
+      }
+    }
+    const reachable = results.some(item => item.reachable)
+    const ok = results.some(item => item.ok)
     const payload = {
-      ok: resp.ok,
+      ok,
       reachable,
-      status: resp.status,
-      status_text: resp.statusText,
+      status: results[0]?.status || 0,
+      status_text: results[0]?.status_text || '',
       method: probe.method,
       url: probeUrl,
       message: reachable
-        ? (resp.ok ? '端点可访问，认证与路径基本正常' : '端点已响应，请根据状态码判断认证或路径是否正确')
+        ? (ok ? '端点可访问，认证与路径基本正常' : '端点已响应，请根据状态码判断认证或路径是否正确')
         : '端点未按预期响应，请检查 Base URL 和代理前缀',
-      response_preview: text.slice(0, 240),
+      response_preview: results.map(item => `${item.url} => ${item.status || item.response_preview}`).join('\n').slice(0, 800),
+      nodes: results,
     }
     if (reachable) {
       logTaskSuccess('AIConfig', 'probe-done', {
         provider: body.provider,
-        status: resp.status,
+        status: payload.status,
         url: probeUrl,
       })
     } else {
       logTaskError('AIConfig', 'probe-unexpected', {
         provider: body.provider,
-        status: resp.status,
+        status: payload.status,
         url: probeUrl,
       })
     }
@@ -338,8 +422,17 @@ app.put('/:id', async (c) => {
   if ('base_url' in body) updates.baseUrl = body.base_url
   if ('api_key' in body) updates.apiKey = body.api_key
   if ('model' in body) updates.model = JSON.stringify(body.model)
+  if ('endpoint' in body) updates.endpoint = body.endpoint
+  if ('query_endpoint' in body) updates.queryEndpoint = body.query_endpoint
+  if ('settings' in body) updates.settings = normalizeSettings(body.settings)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active
+  if ('is_default' in body) updates.isDefault = body.is_default
+
+  if (body.is_default) {
+    const [row] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
+    if (row) clearDefaultForServiceType(row.serviceType, id)
+  }
 
   db.update(schema.aiServiceConfigs).set(updates).where(eq(schema.aiServiceConfigs.id, id)).run()
   return success(c)

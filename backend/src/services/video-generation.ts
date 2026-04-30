@@ -4,7 +4,9 @@ import { getActiveConfig, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl } from '../utils/storage.js'
 import { getVideoAdapter } from './adapters/registry'
+import { joinProviderUrl } from './adapters/url.js'
 import type { AIConfig } from './adapters/types'
+import { configForComfyUITask, encodeComfyUITaskId, isComfyUIProvider, selectComfyUIConfig } from './adapters/comfyui-lb'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 interface GenerateVideoParams {
@@ -74,6 +76,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
 
 async function processVideoGeneration(id: number, config: AIConfig) {
   const adapter = getVideoAdapter(config.provider)
+  const requestConfig = isComfyUIProvider(config.provider) ? selectComfyUIConfig(config) : config
 
   try {
     const rows = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, id)).all()
@@ -86,13 +89,22 @@ async function processVideoGeneration(id: number, config: AIConfig) {
       referenceMode: record.referenceMode,
     })
 
-    const resolvedImageUrl = await normalizeVideoReferenceUrl(record.imageUrl)
-    const resolvedFirstFrameUrl = await normalizeVideoReferenceUrl(record.firstFrameUrl)
-    const resolvedLastFrameUrl = await normalizeVideoReferenceUrl(record.lastFrameUrl)
-    const resolvedReferenceImageUrls = await normalizeVideoReferenceUrls(record.referenceImageUrls)
+    let resolvedImageUrl = await normalizeVideoReferenceUrl(record.imageUrl)
+    let resolvedFirstFrameUrl = await normalizeVideoReferenceUrl(record.firstFrameUrl)
+    let resolvedLastFrameUrl = await normalizeVideoReferenceUrl(record.lastFrameUrl)
+    let resolvedReferenceImageUrls = await normalizeVideoReferenceUrls(record.referenceImageUrls)
+
+    if (isComfyUIProvider(config.provider)) {
+      resolvedImageUrl = await uploadComfyUIImageIfNeeded(requestConfig, resolvedImageUrl)
+      resolvedFirstFrameUrl = await uploadComfyUIImageIfNeeded(requestConfig, resolvedFirstFrameUrl)
+      resolvedLastFrameUrl = await uploadComfyUIImageIfNeeded(requestConfig, resolvedLastFrameUrl)
+      resolvedReferenceImageUrls = (await Promise.all(
+        resolvedReferenceImageUrls.map((item) => uploadComfyUIImageIfNeeded(requestConfig, item)),
+      )).filter((item): item is string => !!item)
+    }
 
     // 使用 Adapter 构建请求
-    const { url, method, headers, body } = adapter.buildGenerateRequest(config, {
+    const { url, method, headers, body } = adapter.buildGenerateRequest(requestConfig, {
       id: record.id,
       model: record.model,
       prompt: record.prompt,
@@ -129,7 +141,10 @@ async function processVideoGeneration(id: number, config: AIConfig) {
     if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
     const result = await resp.json() as any
 
-    const { isAsync, taskId, videoUrl } = adapter.parseGenerateResponse(result)
+    let { isAsync, taskId, videoUrl } = adapter.parseGenerateResponse(result)
+    if (isAsync && taskId && isComfyUIProvider(config.provider)) {
+      taskId = encodeComfyUITaskId(taskId, requestConfig.baseUrl)
+    }
 
     if (!isAsync && videoUrl) {
       logTaskProgress('VideoTask', 'sync-complete', { id, videoUrl })
@@ -195,16 +210,54 @@ async function normalizeVideoReferenceUrls(raw: string | null | undefined): Prom
   return normalized.filter((item): item is string => !!item)
 }
 
+async function uploadComfyUIImageIfNeeded(config: AIConfig, value: string | null): Promise<string | null> {
+  if (!value) return null
+  if (!value.startsWith('data:image/')) return value
+
+  const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+  if (!match) return value
+
+  const mimeType = match[1]
+  const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg'
+  const bytes = Uint8Array.from(Buffer.from(match[2], 'base64'))
+  const blob = new Blob([bytes], { type: mimeType })
+  const filename = `huobao-${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`
+  const form = new FormData()
+  form.append('image', blob, filename)
+  form.append('overwrite', 'true')
+  form.append('type', 'input')
+
+  const uploadUrl = joinProviderUrl(config.baseUrl, '', '/upload/image')
+  logTaskProgress('VideoTask', 'comfyui-upload-image', {
+    url: redactUrl(uploadUrl),
+    filename,
+    mimeType,
+  })
+  const resp = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
+    body: form,
+    signal: AbortSignal.timeout(120_000),
+  })
+
+  if (!resp.ok) throw new Error(`ComfyUI image upload failed ${resp.status}: ${await resp.text()}`)
+  const result = await resp.json() as any
+  return result.name || result.filename || filename
+}
+
 async function pollVideoTask(id: number, config: AIConfig, taskId: string, storyboardId?: number | null) {
   const adapter = getVideoAdapter(config.provider)
+  const pollTarget = isComfyUIProvider(config.provider)
+    ? configForComfyUITask(config, taskId)
+    : { config, taskId }
 
   for (let i = 0; i < 300; i++) {
     await new Promise(r => setTimeout(r, 10000))
     try {
-      const { url, method, headers } = adapter.buildPollRequest(config, taskId)
+      const { url, method, headers } = adapter.buildPollRequest(pollTarget.config, pollTarget.taskId)
       logTaskProgress('VideoTask', 'poll-request', {
         id,
-        taskId,
+        taskId: pollTarget.taskId,
         provider: config.provider,
         method,
         url: redactUrl(url),
@@ -234,7 +287,7 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
           .run()
         return
       }
-      logTaskWarn('VideoTask', 'poll-retry', { id, taskId, attempt: i + 1, error: err.message })
+      logTaskWarn('VideoTask', 'poll-retry', { id, taskId: pollTarget.taskId, attempt: i + 1, error: err.message })
     }
   }
 }

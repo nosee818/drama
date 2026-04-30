@@ -13,6 +13,12 @@ import type {
 } from './types'
 import { joinProviderUrl } from './url'
 
+function endpointUrl(baseUrl: string, endpoint: string | undefined, fallbackPath: string) {
+  const path = endpoint || fallbackPath
+  const hasVersionPrefix = /^\/v\d+(?:\/|$)/.test(path)
+  return joinProviderUrl(baseUrl, hasVersionPrefix ? '' : '/v1', path)
+}
+
 export class OpenAIImageAdapter implements ImageProviderAdapter {
   provider = 'openai'
 
@@ -29,7 +35,7 @@ export class OpenAIImageAdapter implements ImageProviderAdapter {
     }
 
     return {
-      url: joinProviderUrl(config.baseUrl, '/v1', '/images/generations'),
+      url: endpointUrl(config.baseUrl, config.endpoint, '/images/generations'),
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -58,8 +64,9 @@ export class OpenAIImageAdapter implements ImageProviderAdapter {
   }
 
   buildPollRequest(config: AIConfig, taskId: string): ProviderRequest {
+    const endpoint = (config.queryEndpoint || `/images/task/${taskId}`).replace(/\{taskId\}/g, encodeURIComponent(taskId))
     return {
-      url: joinProviderUrl(config.baseUrl, '/v1', `/images/task/${taskId}`),
+      url: endpointUrl(config.baseUrl, endpoint, `/images/task/${taskId}`),
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,

@@ -73,6 +73,9 @@ export interface AIConfig {
   baseUrl: string
   apiKey: string
   model: string
+  endpoint?: string
+  queryEndpoint?: string
+  settings?: Record<string, any>
 }
 
 export interface ImageGenerationRecord {

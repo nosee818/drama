@@ -51,7 +51,7 @@
           <h3 class="project-title">{{ d.title }}</h3>
 
           <div class="project-meta">
-            <span v-if="d.style" class="style-tag">{{ d.style }}</span>
+            <span v-if="d.style" class="style-tag">{{ styleLabel(d.style) }}</span>
             <span class="meta-item">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ d.characters?.length || 0 }}
@@ -88,7 +88,7 @@
     </div>
 
     <!-- Create Dialog -->
-    <div v-if="showCreate" class="overlay" @click.self="showCreate = false">
+    <div v-if="showCreate" class="overlay">
       <div class="modal card">
         <div class="modal-header">
           <div class="modal-icon">
@@ -115,13 +115,36 @@
               <BaseSelect v-model="form.style" :options="styleSelectOptions" placeholder="选择风格" searchable />
             </label>
           </div>
+          <label class="field">
+            <span class="field-label">导入剧本文件</span>
+            <div class="file-drop">
+              <input
+                class="file-input"
+                type="file"
+                accept=".pdf,.doc,.docx,.txt,.md,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+                @change="onFileChange"
+              />
+              <div class="file-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <path d="M14 2v6h6"/>
+                  <path d="M12 18v-6"/>
+                  <path d="M9 15l3 3 3-3"/>
+                </svg>
+              </div>
+              <div class="file-copy">
+                <strong>{{ importFile ? importFile.name : '选择 PDF、Word、TXT 或 MD' }}</strong>
+                <span>{{ importFile ? formatFileSize(importFile.size) : '创建后会按计划集数自动分配到各集内容' }}</span>
+              </div>
+            </div>
+          </label>
           <div class="modal-actions">
             <button type="button" class="btn" @click="showCreate = false">取消</button>
-            <button type="submit" class="btn btn-primary">
+            <button type="submit" class="btn btn-primary" :disabled="creating">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
-              创建项目
+              {{ creating ? '创建中...' : '创建项目' }}
             </button>
           </div>
         </form>
@@ -138,9 +161,18 @@ import BaseSelect from '~/components/BaseSelect.vue'
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: '' })
-const styles = ['realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
-const styleSelectOptions = computed(() => styles.map(s => ({ label: s, value: s })))
+const creating = ref(false)
+const importFile = ref(null)
+const form = ref({ title: '', total_episodes: 1, style: 'realistic' })
+const styles = [
+  { label: '写实', value: 'realistic' },
+  { label: '动漫', value: 'anime' },
+  { label: '吉卜力', value: 'ghibli' },
+  { label: '电影感', value: 'cinematic' },
+  { label: '漫画', value: 'comic' },
+  { label: '水彩', value: 'watercolor' },
+]
+const styleSelectOptions = computed(() => styles)
 
 async function load() {
   loading.value = true
@@ -156,13 +188,54 @@ async function load() {
 
 async function create() {
   if (!form.value.title?.trim()) return
+  creating.value = true
   try {
-    const d = await dramaAPI.create(form.value)
+    let d
+    if (importFile.value) {
+      const payload = new FormData()
+      payload.append('title', form.value.title)
+      payload.append('total_episodes', String(form.value.total_episodes || 1))
+      payload.append('style', form.value.style || 'realistic')
+      payload.append('file', importFile.value)
+      d = await dramaAPI.createWithFile(payload)
+    } else {
+      d = await dramaAPI.create(form.value)
+    }
     showCreate.value = false
+    form.value = { title: '', total_episodes: 1, style: 'realistic' }
+    importFile.value = null
     navigateTo(`/drama/${d.id}`)
   } catch (e) {
     toast.error(e.message)
+  } finally {
+    creating.value = false
   }
+}
+
+function onFileChange(event) {
+  const file = event.target.files?.[0]
+  if (!file) {
+    importFile.value = null
+    return
+  }
+  const ext = file.name.split('.').pop()?.toLowerCase()
+  if (!['pdf', 'doc', 'docx', 'txt', 'md'].includes(ext)) {
+    toast.error('仅支持 PDF、Word、TXT 和 MD 文件')
+    event.target.value = ''
+    importFile.value = null
+    return
+  }
+  importFile.value = file
+}
+
+function formatFileSize(size) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function styleLabel(value) {
+  return styles.find(s => s.value === value)?.label || value
 }
 
 async function delDrama(d) {
@@ -195,7 +268,18 @@ function getProgress(d) {
   return Math.round((scripted / d.episodes.length) * 100)
 }
 
-onMounted(load)
+function handleCreateDialogKeydown(event) {
+  if (event.key === 'Escape' && showCreate.value) showCreate.value = false
+}
+
+onMounted(() => {
+  load()
+  window.addEventListener('keydown', handleCreateDialogKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleCreateDialogKeydown)
+})
 </script>
 
 <style scoped>
@@ -368,7 +452,7 @@ onMounted(load)
 .empty-desc { font-size: 12px; color: var(--text-3); max-width: 220px; line-height: 1.6; }
 
 /* Modal */
-.modal { padding: 32px; width: 460px; box-shadow: var(--shadow-elevated); animation: scaleIn 0.2s var(--ease-out); }
+.modal { padding: 32px; width: 560px; box-shadow: var(--shadow-elevated); animation: scaleIn 0.2s var(--ease-out); }
 .modal-header { margin-bottom: 24px; display: flex; flex-direction: column; gap: 6px; }
 .modal-icon {
   width: 44px; height: 44px; border-radius: var(--radius);
@@ -383,5 +467,57 @@ onMounted(load)
 .field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .required { color: var(--error); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.file-drop {
+  position: relative;
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  transition: border-color 0.18s, background 0.18s;
+}
+.file-drop:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.file-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.file-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.file-copy strong {
+  font-size: 13px;
+  color: var(--text-1);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-copy span {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.45;
+}
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 6px; }
 </style>

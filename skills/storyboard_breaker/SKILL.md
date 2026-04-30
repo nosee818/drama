@@ -31,6 +31,8 @@ description: 分镜拆解专业规范
 
 ## 视频提示词格式
 
+所有提示词字段必须使用中文，包括 `image_prompt / video_prompt / bgm_prompt / sound_effect`。不要输出英文镜头、画质、风格后缀；需要表达电影感、高质量、统一风格时，也用中文描述。
+
 每个镜头必须包含 `video_prompt` 字段，用于驱动 AI 视频生成：
 
 ```

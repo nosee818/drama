@@ -30,11 +30,12 @@ app.post('/:type/chat', async (c) => {
   }
 
   const body = await c.req.json()
-  const { message, drama_id, episode_id } = body
+  const { message, drama_id, episode_id, text_config_id } = body
 
   logTaskStart('Agent', agentType, {
     dramaId: drama_id,
     episodeId: episode_id,
+    textConfigId: text_config_id || null,
     message,
   })
   logTaskPayload('Agent', `${agentType} input`, body)
@@ -44,7 +45,9 @@ app.post('/:type/chat', async (c) => {
     return badRequest(c, 'drama_id and episode_id are required')
   }
 
-  const agent = createAgent(agentType, episode_id, drama_id)
+  const agent = createAgent(agentType, episode_id, drama_id, {
+    textConfigId: text_config_id ? Number(text_config_id) : null,
+  })
   if (!agent) {
     logTaskError('Agent', agentType, { reason: 'agent not found' })
     return badRequest(c, 'Agent not found')

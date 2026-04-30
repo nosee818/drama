@@ -1,8 +1,15 @@
 # Dependencies
 node_modules/
+.venv/
+venv/
 
 # Build output
 dist/
+.nuxt/
+.output/
+frontend/.nuxt/
+frontend/.output/
+frontend/0.0.0.0/
 
 # IDE
 .idea/
@@ -33,9 +40,21 @@ data/public.sql
 data/*.bak*
 data/static/
 data/storage/
+data/uploads/
+data/tmp/
 
 # Config
 configs/config.yaml
+configs/*.local.*
+configs/package-lock.json
+backend/package.json.bak
+
+# Secrets / local backups
+*.pem
+*.key
+*.p12
+*.secret
+*.bak
 
 # Misc
 tmp/
