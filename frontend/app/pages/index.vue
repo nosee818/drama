@@ -52,6 +52,7 @@
 
           <div class="project-meta">
             <span v-if="d.style" class="style-tag">{{ styleLabel(d.style) }}</span>
+            <span class="style-tag orientation-tag">{{ orientationLabel(d) }}</span>
             <span class="meta-item">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ d.characters?.length || 0 }}
@@ -64,12 +65,15 @@
         </div>
 
         <div class="card-footer">
+          <div class="footer-meta">
+            <span class="card-date">创建 {{ fmtFullDate(d.created_at || d.createdAt) }}</span>
+            <span class="card-date">更新 {{ fmtRelativeTime(d.updated_at || d.updatedAt) }}</span>
+          </div>
           <div class="progress-mini">
             <div class="progress-mini-track">
               <div class="progress-mini-fill" :style="{ width: getProgress(d) + '%' }"></div>
             </div>
           </div>
-          <span class="card-date">{{ fmtDate(d.updated_at || d.updatedAt) }}</span>
         </div>
       </div>
 
@@ -115,6 +119,24 @@
               <BaseSelect v-model="form.style" :options="styleSelectOptions" placeholder="选择风格" searchable />
             </label>
           </div>
+          <label class="field">
+            <span class="field-label">成片画幅</span>
+            <div class="orientation-segment">
+              <button
+                v-for="option in orientationOptions"
+                :key="option.value"
+                type="button"
+                :class="['orientation-option', form.orientation === option.value && 'is-selected']"
+                @click="form.orientation = option.value"
+              >
+                <span :class="['orientation-preview', option.value]"></span>
+                <span>
+                  <strong>{{ option.label }}</strong>
+                  <small>{{ option.hint }}</small>
+                </span>
+              </button>
+            </div>
+          </label>
           <label class="field">
             <span class="field-label">导入剧本文件</span>
             <div class="file-drop">
@@ -163,7 +185,7 @@ const loading = ref(false)
 const showCreate = ref(false)
 const creating = ref(false)
 const importFile = ref(null)
-const form = ref({ title: '', total_episodes: 1, style: 'realistic' })
+const form = ref({ title: '', total_episodes: 1, style: 'realistic', orientation: 'portrait' })
 const styles = [
   { label: '写实', value: 'realistic' },
   { label: '动漫', value: 'anime' },
@@ -173,6 +195,10 @@ const styles = [
   { label: '水彩', value: 'watercolor' },
 ]
 const styleSelectOptions = computed(() => styles)
+const orientationOptions = [
+  { label: '竖屏', value: 'portrait', hint: '9:16，短视频默认' },
+  { label: '横屏', value: 'landscape', hint: '16:9，横版短剧' },
+]
 
 async function load() {
   loading.value = true
@@ -196,13 +222,14 @@ async function create() {
       payload.append('title', form.value.title)
       payload.append('total_episodes', String(form.value.total_episodes || 1))
       payload.append('style', form.value.style || 'realistic')
+      payload.append('orientation', form.value.orientation || 'portrait')
       payload.append('file', importFile.value)
       d = await dramaAPI.createWithFile(payload)
     } else {
       d = await dramaAPI.create(form.value)
     }
     showCreate.value = false
-    form.value = { title: '', total_episodes: 1, style: 'realistic' }
+    form.value = { title: '', total_episodes: 1, style: 'realistic', orientation: 'portrait' }
     importFile.value = null
     navigateTo(`/drama/${d.id}`)
   } catch (e) {
@@ -238,6 +265,18 @@ function styleLabel(value) {
   return styles.find(s => s.value === value)?.label || value
 }
 
+function parseMetadata(value) {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try { return JSON.parse(value) || {} } catch { return {} }
+}
+
+function orientationLabel(drama) {
+  const metadata = parseMetadata(drama?.metadata)
+  const value = String(metadata.orientation || metadata.aspect_ratio || '').toLowerCase()
+  return ['landscape', 'horizontal', '16:9', 'wide', '横屏'].includes(value) ? '横屏 16:9' : '竖屏 9:16'
+}
+
 async function delDrama(d) {
   if (!confirm(`确定删除「${d.title}」？此操作不可恢复。`)) return
   try {
@@ -249,7 +288,7 @@ async function delDrama(d) {
   }
 }
 
-function fmtDate(s) {
+function fmtRelativeTime(s) {
   if (!s) return ''
   const d = new Date(s)
   const now = new Date()
@@ -259,6 +298,13 @@ function fmtDate(s) {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
   if (diff < 604800000) return `${Math.floor(diff / 86400000)} 天前`
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
+function fmtFullDate(s) {
+  if (!s) return '未知'
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return '未知'
+  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-')
 }
 
 function getProgress(d) {
@@ -385,6 +431,11 @@ onBeforeUnmount(() => {
   border-radius: 99px;
   border: 1px solid rgba(184,120,20,0.12);
 }
+.orientation-tag {
+  background: rgba(76,125,255,0.1);
+  color: var(--accent);
+  border-color: rgba(76,125,255,0.18);
+}
 .meta-item {
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: var(--text-3);
@@ -394,8 +445,16 @@ onBeforeUnmount(() => {
   padding: 10px 18px 14px;
   border-top: 1px solid var(--border);
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.footer-meta {
+  display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
 }
 .progress-mini { flex: 1; }
 .progress-mini-track {
@@ -408,7 +467,14 @@ onBeforeUnmount(() => {
   border-radius: 99px;
   transition: width 0.6s var(--ease-out);
 }
-.card-date { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.card-date {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Loading Skeleton */
 .loading-grid {
@@ -467,6 +533,65 @@ onBeforeUnmount(() => {
 .field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .required { color: var(--error); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.orientation-segment {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.orientation-option {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  color: var(--text-1);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+}
+.orientation-option:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.orientation-option.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: 0 0 0 3px rgba(76,125,255,0.12);
+}
+.orientation-option span:last-child {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.orientation-option strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+.orientation-option small {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.orientation-preview {
+  flex: 0 0 auto;
+  display: block;
+  border: 2px solid currentColor;
+  border-radius: 5px;
+  color: var(--accent);
+  background: rgba(76,125,255,0.08);
+}
+.orientation-preview.portrait {
+  width: 22px;
+  height: 34px;
+}
+.orientation-preview.landscape {
+  width: 38px;
+  height: 24px;
+}
 .file-drop {
   position: relative;
   min-height: 76px;

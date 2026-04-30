@@ -4,8 +4,23 @@ import { db, schema } from '../db/index.js'
 import { success, created, badRequest } from '../utils/response.js'
 import { generateVideo } from '../services/video-generation.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { dramaOrientation, orientationAspectRatio, orientationVideoSize, parseSize } from '../utils/aspect.js'
 
 const app = new Hono()
+
+function getDramaForVideoRequest(body: any) {
+  if (body.drama_id) {
+    return db.select().from(schema.dramas).where(eq(schema.dramas.id, Number(body.drama_id))).all()[0]
+  }
+  if (body.storyboard_id) {
+    const sb = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()[0]
+    if (sb) {
+      const ep = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()[0]
+      if (ep) return db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()[0]
+    }
+  }
+  return null
+}
 
 // POST /videos — Generate video
 app.post('/', async (c) => {
@@ -29,6 +44,9 @@ app.post('/', async (c) => {
       duration: body.duration,
     })
     logTaskPayload('VideoAPI', 'request body', body)
+    const drama = getDramaForVideoRequest(body)
+    const orientation = dramaOrientation(drama)
+    const size = parseSize(body.size || orientationVideoSize(orientation), '1280x720')
     const id = await generateVideo({
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
@@ -40,7 +58,9 @@ app.post('/', async (c) => {
       lastFrameUrl: body.last_frame_url,
       referenceImageUrls: body.reference_image_urls,
       duration: body.duration,
-      aspectRatio: body.aspect_ratio,
+      aspectRatio: body.aspect_ratio || orientationAspectRatio(orientation),
+      width: Number(body.width || size.width),
+      height: Number(body.height || size.height),
       configId,
     })
 

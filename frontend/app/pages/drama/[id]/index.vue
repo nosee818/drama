@@ -12,8 +12,9 @@
         <div class="head-info">
           <h1 class="page-title">{{ drama.title }}</h1>
           <div class="page-meta">
-            <span v-if="drama.style" class="style-chip">{{ drama.style }}</span>
-            <span v-if="drama.style" class="meta-divider"></span>
+            <span v-if="drama.style" class="style-chip">{{ styleLabel(drama.style) }}</span>
+            <span class="style-chip orientation-chip">{{ projectOrientationLabel }}</span>
+            <span class="meta-divider"></span>
             <span class="meta-item">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ drama.characters?.length || 0 }} 角色
@@ -51,14 +52,29 @@
       </div>
       <div class="defaults-grid">
         <label class="default-card">
+          <span class="config-card-kicker">FORMAT</span>
+          <span class="field-label">成片画幅</span>
+          <BaseSelect v-model="projectOrientationForm" :options="orientationOptions" placeholder="选择画幅" />
+        </label>
+        <label class="default-card">
           <span class="config-card-kicker">TEXT</span>
           <span class="field-label">文本模型</span>
           <BaseSelect v-model="defaultTextConfigId" :options="textConfigOptions" placeholder="选择文本模型" searchable />
         </label>
         <label class="default-card">
-          <span class="config-card-kicker">IMAGE</span>
-          <span class="field-label">图片模型</span>
-          <BaseSelect v-model="defaultImageConfigId" :options="imageConfigOptions" placeholder="选择图片服务" searchable />
+          <span class="config-card-kicker">CHARACTER</span>
+          <span class="field-label">角色形象模型</span>
+          <BaseSelect v-model="defaultCharacterImageConfigId" :options="imageConfigOptions" placeholder="选择角色图片服务" searchable />
+        </label>
+        <label class="default-card">
+          <span class="config-card-kicker">SCENE</span>
+          <span class="field-label">场景图片模型</span>
+          <BaseSelect v-model="defaultSceneImageConfigId" :options="imageConfigOptions" placeholder="选择场景图片服务" searchable />
+        </label>
+        <label class="default-card">
+          <span class="config-card-kicker">SHOT</span>
+          <span class="field-label">镜头图片模型</span>
+          <BaseSelect v-model="defaultShotImageConfigId" :options="imageConfigOptions" placeholder="选择镜头图片服务" searchable />
         </label>
         <label class="default-card">
           <span class="config-card-kicker">AUDIO</span>
@@ -82,7 +98,7 @@
             </svg>
             自动生成
           </div>
-          <p class="defaults-copy">选择目标阶段后，系统会按集数顺序补齐前置流程。没有 TTS 配置时会跳过配音，不阻塞后续视频合成。</p>
+          <p class="defaults-copy">选择目标阶段后，系统会按集数顺序补齐前置流程。没有 TTS 配置时会跳过配音和视频配音合成，不阻塞最终拼接。</p>
         </div>
         <div class="auto-actions">
           <button class="btn btn-ghost" @click="taskLogDialog = true">
@@ -231,8 +247,13 @@
       </div>
       <div class="character-grid">
         <article v-for="char in visibleCharacters" :key="char.id" class="character-card">
-          <div class="character-avatar">
-            <img v-if="char.image_url || char.imageUrl" :src="assetUrl(char.image_url || char.imageUrl)" :alt="char.name" />
+          <div :class="['character-avatar', characterAvatarClass(char)]">
+            <img
+              v-if="char.image_url || char.imageUrl"
+              :src="assetUrl(char.image_url || char.imageUrl)"
+              :alt="char.name"
+              @load="rememberImageRatio(char.id, $event)"
+            />
             <span v-else>{{ (char.name || '?').slice(0, 1) }}</span>
           </div>
           <div class="character-copy">
@@ -458,6 +479,7 @@ const characterDialog = ref(false)
 const editingCharacter = ref(null)
 const savingCharacter = ref(false)
 const pendingCharacterImageIds = ref([])
+const imageRatios = ref({})
 const characterForm = ref({
   name: '',
   role: '',
@@ -473,8 +495,12 @@ const videoConfigs = ref([])
 const audioConfigs = ref([])
 const defaultTextConfigId = ref(null)
 const defaultImageConfigId = ref(null)
+const defaultCharacterImageConfigId = ref(null)
+const defaultSceneImageConfigId = ref(null)
+const defaultShotImageConfigId = ref(null)
 const defaultVideoConfigId = ref(null)
 const defaultAudioConfigId = ref(null)
+const projectOrientationForm = ref('portrait')
 const newEpisodeImageConfigId = ref(null)
 const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
@@ -482,12 +508,16 @@ const autoTargetOptions = [
   { label: '到分镜', value: 'storyboard' },
   { label: '到镜头图片', value: 'shot_images' },
   { label: '到视频生成', value: 'videos' },
-  { label: '到最后合成', value: 'compose' },
+  { label: '到最终拼接', value: 'compose' },
 ]
 const autoRangeOptions = [
   { label: '全剧', value: 'all' },
   { label: '前 N 集', value: 'prefix' },
   { label: '指定集数', value: 'custom' },
+]
+const orientationOptions = [
+  { label: '竖屏 9:16', value: 'portrait' },
+  { label: '横屏 16:9', value: 'landscape' },
 ]
 
 function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
@@ -501,7 +531,7 @@ function toggleAutoEpisode(number) {
 }
 
 function targetLabel(target) {
-  return ({ storyboard: '分镜', shot_images: '镜头图片', videos: '视频生成', compose: '最终合成' })[target] || target
+  return ({ storyboard: '分镜', shot_images: '镜头图片', videos: '视频生成', compose: '最终拼接' })[target] || target
 }
 
 function describeAutoJob(job) {
@@ -543,7 +573,7 @@ const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: 
 const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
-const canSaveDefaults = computed(() => !!(defaultTextConfigId.value || defaultImageConfigId.value || defaultVideoConfigId.value || defaultAudioConfigId.value))
+const canSaveDefaults = computed(() => !!(projectOrientationForm.value || defaultTextConfigId.value || defaultImageConfigId.value || defaultCharacterImageConfigId.value || defaultSceneImageConfigId.value || defaultShotImageConfigId.value || defaultVideoConfigId.value || defaultAudioConfigId.value))
 const sortedEpisodes = computed(() => [...(drama.value?.episodes || [])].sort((a, b) => Number(a.episode_number || a.episodeNumber) - Number(b.episode_number || b.episodeNumber)))
 function jobProgress(job) {
   const total = Number(job?.totalEpisodes || 0)
@@ -562,11 +592,48 @@ const characterLibrary = computed(() => {
 })
 const producedCharacters = computed(() => characterLibrary.value.filter(c => c.image_url || c.imageUrl || c.voice_sample_url || c.voiceSampleUrl))
 const visibleCharacters = computed(() => showAllCharacters.value ? characterLibrary.value : characterLibrary.value.slice(0, 8))
+const projectOrientation = computed(() => normalizeOrientation(parseMetadata(drama.value?.metadata).orientation || parseMetadata(drama.value?.metadata).aspect_ratio))
+const projectOrientationLabel = computed(() => projectOrientation.value === 'landscape' ? '横屏 16:9' : '竖屏 9:16')
 
 function assetUrl(value) {
   if (!value) return ''
   if (/^https?:\/\//.test(value)) return value
   return value.startsWith('/') ? value : `/${value}`
+}
+
+function normalizeOrientation(value) {
+  const text = String(value || '').toLowerCase()
+  if (['landscape', 'horizontal', '16:9', 'wide', '横屏'].includes(text)) return 'landscape'
+  return 'portrait'
+}
+
+function styleLabel(value) {
+  return ({
+    realistic: '写实',
+    anime: '动漫',
+    ghibli: '吉卜力',
+    cinematic: '电影感',
+    comic: '漫画',
+    watercolor: '水彩',
+  })[value] || value
+}
+
+function rememberImageRatio(id, event) {
+  const img = event.target
+  if (!img?.naturalWidth || !img?.naturalHeight) return
+  imageRatios.value = {
+    ...imageRatios.value,
+    [id]: img.naturalWidth / img.naturalHeight,
+  }
+}
+
+function characterAvatarClass(char) {
+  if (!(char?.image_url || char?.imageUrl)) return 'is-empty'
+  const ratio = imageRatios.value[char.id]
+  if (!ratio) return projectOrientation.value === 'landscape' ? 'is-wide' : 'is-tall'
+  if (ratio > 1.25) return 'is-wide'
+  if (ratio < 0.82) return 'is-tall'
+  return 'is-square'
 }
 
 function characterImage(char) {
@@ -678,14 +745,18 @@ function projectDefaults() {
 
 function applyProjectDefaultsToForm() {
   const defaults = projectDefaults()
+  projectOrientationForm.value = projectOrientation.value
   defaultTextConfigId.value = defaults.text_config_id || defaultTextConfigId.value || activeFirst(textConfigs.value)?.id || null
   defaultImageConfigId.value = defaults.image_config_id || defaultImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
+  defaultCharacterImageConfigId.value = defaults.character_image_config_id || defaults.image_config_id || defaultCharacterImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
+  defaultSceneImageConfigId.value = defaults.scene_image_config_id || defaults.image_config_id || defaultSceneImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
+  defaultShotImageConfigId.value = defaults.shot_image_config_id || defaults.image_config_id || defaultShotImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
   defaultVideoConfigId.value = defaults.video_config_id || defaultVideoConfigId.value || activeFirst(videoConfigs.value)?.id || null
   defaultAudioConfigId.value = defaults.audio_config_id || defaultAudioConfigId.value || activeFirst(audioConfigs.value)?.id || null
 }
 
 function syncNewEpisodeDefaults() {
-  newEpisodeImageConfigId.value = defaultImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
+  newEpisodeImageConfigId.value = defaultShotImageConfigId.value || defaultImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
   newEpisodeVideoConfigId.value = defaultVideoConfigId.value || activeFirst(videoConfigs.value)?.id || null
   newEpisodeAudioConfigId.value = defaultAudioConfigId.value || activeFirst(audioConfigs.value)?.id || null
 }
@@ -749,9 +820,15 @@ async function saveProjectDefaults() {
     savingDefaults.value = true
     const metadata = {
       ...parseMetadata(drama.value?.metadata),
+      orientation: projectOrientationForm.value,
+      aspect_ratio: projectOrientationForm.value === 'landscape' ? '16:9' : '9:16',
+      image_size: projectOrientationForm.value === 'landscape' ? '1920x1080' : '1080x1920',
       ai_defaults: {
         text_config_id: defaultTextConfigId.value || null,
-        image_config_id: defaultImageConfigId.value || null,
+        image_config_id: defaultShotImageConfigId.value || defaultImageConfigId.value || null,
+        character_image_config_id: defaultCharacterImageConfigId.value || null,
+        scene_image_config_id: defaultSceneImageConfigId.value || null,
+        shot_image_config_id: defaultShotImageConfigId.value || null,
         video_config_id: defaultVideoConfigId.value || null,
         audio_config_id: defaultAudioConfigId.value || null,
       },
@@ -759,7 +836,7 @@ async function saveProjectDefaults() {
     await dramaAPI.update(dramaId, { metadata: JSON.stringify(metadata) })
     const episodes = drama.value?.episodes || []
     await Promise.all(episodes.map(ep => episodeAPI.update(ep.id, {
-      image_config_id: defaultImageConfigId.value || ep.image_config_id || ep.imageConfigId,
+      image_config_id: defaultShotImageConfigId.value || defaultImageConfigId.value || ep.image_config_id || ep.imageConfigId,
       video_config_id: defaultVideoConfigId.value || ep.video_config_id || ep.videoConfigId,
       audio_config_id: defaultAudioConfigId.value || ep.audio_config_id || ep.audioConfigId,
     })))
@@ -909,7 +986,7 @@ function handleAddDialogKeydown(event) {
   if (event.key === 'Escape' && taskLogDialog.value) taskLogDialog.value = false
 }
 
-watch([defaultImageConfigId, defaultVideoConfigId, defaultAudioConfigId], () => {
+watch([defaultImageConfigId, defaultShotImageConfigId, defaultVideoConfigId, defaultAudioConfigId], () => {
   if (!addDialog.value) return
   syncNewEpisodeDefaults()
 })
@@ -968,6 +1045,11 @@ onBeforeUnmount(() => {
   padding: 2px 8px;
   background: var(--accent-bg); color: var(--accent-text);
   border-radius: 99px; border: 1px solid rgba(184,120,20,0.12);
+}
+.orientation-chip {
+  background: rgba(76,125,255,0.1);
+  color: var(--accent);
+  border-color: rgba(76,125,255,0.18);
 }
 .meta-divider { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
 .meta-item {
@@ -1234,7 +1316,8 @@ onBeforeUnmount(() => {
 }
 .character-card {
   display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
   gap: 10px;
   min-width: 0;
   padding: 12px;
@@ -1243,8 +1326,8 @@ onBeforeUnmount(() => {
   background: rgba(248,251,255,0.88);
 }
 .character-avatar {
-  width: 54px;
-  height: 54px;
+  width: 58px;
+  height: 58px;
   overflow: hidden;
   border-radius: 12px;
   display: flex;
@@ -1255,10 +1338,24 @@ onBeforeUnmount(() => {
   font-size: 20px;
   font-weight: 800;
 }
+.character-avatar.is-tall {
+  width: 58px;
+  height: 82px;
+}
+.character-avatar.is-wide {
+  width: 86px;
+  height: 54px;
+}
+.character-avatar.is-square,
+.character-avatar.is-empty {
+  width: 58px;
+  height: 58px;
+}
 .character-avatar img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  display: block;
 }
 .character-copy {
   min-width: 0;
@@ -1339,7 +1436,7 @@ onBeforeUnmount(() => {
 }
 .defaults-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 10px;
 }
 .default-card {

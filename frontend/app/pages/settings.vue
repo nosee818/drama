@@ -32,12 +32,12 @@
         <div class="settings-head">
           <div class="settings-brand">
             <div class="settings-brand-mark">
-              <img v-if="showBrandImage" :src="brandLogo" alt="火宝短剧" class="settings-brand-logo" @error="showBrandImage = false" />
+              <img v-if="showBrandImage" :src="brandLogo" alt="VeryAI短剧平台" class="settings-brand-logo" @error="showBrandImage = false" />
               <span v-else class="settings-brand-fallback">火</span>
             </div>
             <div class="settings-brand-copy">
-              <div class="settings-brand-kicker">Huobao Shorts</div>
-              <div class="settings-brand-name">火宝短剧</div>
+              <div class="settings-brand-kicker">VeryAI Shorts</div>
+              <div class="settings-brand-name">VeryAI短剧平台</div>
             </div>
           </div>
           <h2 class="settings-title">AI 服务配置</h2>
@@ -47,11 +47,11 @@
           <div class="setup-panel-head">
             <div>
               <div class="setup-kicker">Quick Setup</div>
-              <div class="setup-title">火宝推荐配置</div>
+              <div class="setup-title">推荐配置</div>
               <div class="setup-desc">一键写入文本、图片、视频、音频四类推荐配置，适合作为开箱默认方案。</div>
             </div>
             <button class="btn btn-primary" @click="presetDialog = true">
-              <Sparkles :size="14" /> 火宝一键配置
+              <Sparkles :size="14" /> 一键配置
             </button>
           </div>
           <div class="preset-grid">
@@ -127,12 +127,12 @@
         <div class="settings-head">
           <div class="settings-brand">
             <div class="settings-brand-mark">
-              <img v-if="showBrandImage" :src="brandLogo" alt="火宝短剧" class="settings-brand-logo" @error="showBrandImage = false" />
+              <img v-if="showBrandImage" :src="brandLogo" alt="VeryAI短剧平台" class="settings-brand-logo" @error="showBrandImage = false" />
               <span v-else class="settings-brand-fallback">火</span>
             </div>
             <div class="settings-brand-copy">
-              <div class="settings-brand-kicker">Huobao Shorts</div>
-              <div class="settings-brand-name">火宝短剧</div>
+              <div class="settings-brand-kicker">VeryAI Shorts</div>
+              <div class="settings-brand-name">VeryAI短剧平台</div>
             </div>
           </div>
           <h2 class="settings-title">Agent 配置</h2>
@@ -206,12 +206,12 @@
           <div class="settings-head">
             <div class="settings-brand">
               <div class="settings-brand-mark">
-                <img v-if="showBrandImage" :src="brandLogo" alt="火宝短剧" class="settings-brand-logo" @error="showBrandImage = false" />
+                <img v-if="showBrandImage" :src="brandLogo" alt="VeryAI短剧平台" class="settings-brand-logo" @error="showBrandImage = false" />
                 <span v-else class="settings-brand-fallback">火</span>
               </div>
               <div class="settings-brand-copy">
-                <div class="settings-brand-kicker">Huobao Shorts</div>
-                <div class="settings-brand-name">火宝短剧</div>
+                <div class="settings-brand-kicker">VeryAI Shorts</div>
+                <div class="settings-brand-name">VeryAI短剧平台</div>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
@@ -352,14 +352,14 @@
       </form>
     </div>
 
-    <!-- Huobao Preset Dialog -->
+    <!-- Recommended Preset Dialog -->
     <div v-if="presetDialog" class="overlay">
       <form class="modal card config-modal" @submit.prevent="applyHuobaoPreset">
         <div class="config-modal-head">
           <div>
-            <div class="setup-kicker">Huobao Preset</div>
-            <h2 class="modal-title">火宝一键配置</h2>
-            <div class="modal-note">按火宝推荐链路自动创建或更新 4 条服务配置，并同时初始化 5 个 Agent 的默认模型。</div>
+            <div class="setup-kicker">Recommended Preset</div>
+            <h2 class="modal-title">一键配置</h2>
+            <div class="modal-note">按推荐链路自动创建或更新 4 条服务配置，并同时初始化 5 个 Agent 的默认模型。</div>
           </div>
           <span class="tag tag-success">推荐</span>
         </div>
@@ -624,7 +624,7 @@ async function applyHuobaoPreset() {
     await loadCfgs()
     await loadAgents()
     presetDialog.value = false
-    toast.success('火宝推荐配置与默认 Agent LLM 已写入')
+    toast.success('推荐配置与默认 Agent LLM 已写入')
   } catch (e) {
     toast.error(e.message)
   }

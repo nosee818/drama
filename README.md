@@ -1,6 +1,6 @@
-# Huobao Drama 自定义版
+# VeryAI 短剧平台
 
-这是基于 `chatfire-AI/huobao-drama` 二次改造的 AI 短剧生产工具，用于从剧本导入、AI 改写、角色/场景提取、分镜、图片、视频到合成的一体化制作。
+VeryAI 短剧平台是一个面向 AI 短剧生产的工作台，用于从剧本导入、AI 改写、角色/场景提取、分镜、图片、视频到视频与语音合成的一体化制作。
 
 本仓库只建议保存代码和配置模板，不保存 API Key、数据库、上传文件、生成图片、生成视频等运行数据。
 
@@ -60,7 +60,7 @@ unzip -v
 
 ```bash
 git clone <your-repo-url>
-cd huobao-drama
+cd drama
 
 cd backend
 npm install
@@ -203,15 +203,15 @@ git status --short --ignored
 建议在自己的 GitHub 创建一个私有仓库，然后把远端地址加为 `backup`：
 
 ```bash
-git remote add backup git@github.com:<your-name>/<your-repo>.git
-git push -u backup master
+git remote add origin git@github.com:nosee818/drama.git
+git push -u origin main
 ```
 
 如果使用 HTTPS：
 
 ```bash
-git remote add backup https://github.com/<your-name>/<your-repo>.git
-git push -u backup master
+git remote add origin https://github.com/nosee818/drama.git
+git push -u origin main
 ```
 
 首次推送前建议先检查将要提交的文件：

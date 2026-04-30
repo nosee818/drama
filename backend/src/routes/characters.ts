@@ -5,8 +5,18 @@ import { success, badRequest, now } from '../utils/response.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { dramaOrientation, orientationImageSize } from '../utils/aspect.js'
 
 const app = new Hono()
+
+function safeJson(value?: string | null) {
+  try { return JSON.parse(value || '{}') || {} } catch { return {} }
+}
+
+function characterImageConfigId(drama: any, fallback?: number | null) {
+  const defaults = safeJson(drama?.metadata).ai_defaults || {}
+  return Number(defaults.character_image_config_id || defaults.image_config_id || fallback || 0) || undefined
+}
 
 const transientStatePatterns = [
   /昏迷[^，。；、]*/g,
@@ -126,7 +136,8 @@ app.post('/:id/generate-image', async (c) => {
   const prompt = buildCharacterReferencePrompt(char)
   try {
     logTaskStart('CharacterImage', 'generate', { characterId: id, episodeId: ep.id, dramaId: char.dramaId })
-    const genId = await generateImage({ characterId: id, dramaId: char.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
+    const genId = await generateImage({ characterId: id, dramaId: char.dramaId, prompt, size: orientationImageSize(dramaOrientation(drama)), configId: body.config_id || characterImageConfigId(drama, ep.imageConfigId) })
     logTaskSuccess('CharacterImage', 'generate', { characterId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {
@@ -148,7 +159,8 @@ app.post('/batch-generate-images', async (c) => {
     if (!char) continue
     const prompt = buildCharacterReferencePrompt(char)
     try {
-      const genId = await generateImage({ characterId: cid, dramaId: char.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
+      const genId = await generateImage({ characterId: cid, dramaId: char.dramaId, prompt, size: orientationImageSize(dramaOrientation(drama)), configId: body.config_id || characterImageConfigId(drama, ep.imageConfigId) })
       results.push(genId)
     } catch {}
   }

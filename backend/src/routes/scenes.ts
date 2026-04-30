@@ -4,8 +4,18 @@ import { db, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { dramaOrientation, orientationImageSize } from '../utils/aspect.js'
 
 const app = new Hono()
+
+function safeJson(value?: string | null) {
+  try { return JSON.parse(value || '{}') || {} } catch { return {} }
+}
+
+function sceneImageConfigId(drama: any, fallback?: number | null) {
+  const defaults = safeJson(drama?.metadata).ai_defaults || {}
+  return Number(defaults.scene_image_config_id || defaults.image_config_id || fallback || 0) || undefined
+}
 
 // POST /scenes
 app.post('/', async (c) => {
@@ -51,7 +61,8 @@ app.post('/:id/generate-image', async (c) => {
   try {
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep.id, dramaId: scene.dramaId, location: scene.location })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
-    const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+    const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, scene.dramaId)).all()
+    const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, size: orientationImageSize(dramaOrientation(drama)), configId: body.config_id || sceneImageConfigId(drama, ep.imageConfigId) })
     logTaskSuccess('SceneImage', 'generate', { sceneId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {

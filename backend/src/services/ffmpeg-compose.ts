@@ -37,6 +37,18 @@ function supportsSubtitleFilter(): boolean {
   return subtitleFilterSupport
 }
 
+function hasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        resolve(false)
+        return
+      }
+      resolve((metadata.streams || []).some((stream: any) => stream.codec_type === 'audio'))
+    })
+  })
+}
+
 function parseDialogueForTTS(dialogue?: string | null) {
   const raw = dialogue?.trim() || ''
   if (!raw) return { speaker: '', pureText: '', ignorable: true }
@@ -134,6 +146,8 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     const outputFilename = `${uuid()}.mp4`
     const outputPath = path.join(outputDir, outputFilename)
 
+    const sourceHasAudio = await hasAudioStream(videoPath)
+
     await new Promise<void>((resolve, reject) => {
       let cmd = ffmpeg(videoPath)
 
@@ -163,8 +177,13 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
       const outputOptions = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
 
-      if (audioPath) {
+      if (audioPath && sourceHasAudio) {
+        cmd = cmd.complexFilter(['[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]'])
+        outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-shortest')
+      } else if (audioPath) {
         outputOptions.push('-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-shortest')
+      } else if (sourceHasAudio) {
+        outputOptions.push('-map', '0:v', '-map', '0:a?', '-c:a', 'aac', '-shortest')
       } else {
         outputOptions.push('-an')
       }

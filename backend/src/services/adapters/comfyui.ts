@@ -150,6 +150,11 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
     const settings = config.settings || {}
     const duration = Number(record.duration || 5)
     const fps = Number(settings.fps || 24)
+    const fallbackSize = record.aspectRatio === '9:16' ? '720x1280' : '1280x720'
+    const parsedSize = parseSize(fallbackSize)
+    const width = Number(record.width || parsedSize.width)
+    const height = Number(record.height || parsedSize.height)
+    const frameCount = Math.max(1, Math.round(duration * fps) + 1)
     return this.buildPromptRequest(config, {
       prompt: record.prompt || '',
       model: record.model || config.model,
@@ -158,8 +163,20 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
       input_image: record.imageUrl || record.firstFrameUrl || '',
       duration,
       fps,
-      frame_count: Math.max(1, Math.round(duration * fps) + 1),
+      frame_count: frameCount,
+      FrameCount: frameCount,
+      frames: frameCount,
+      Frames: frameCount,
+      width,
+      Width: width,
+      height,
+      Height: height,
+      video_width: width,
+      VideoWidth: width,
+      video_height: height,
+      VideoHeight: height,
       aspect_ratio: record.aspectRatio || '16:9',
+      AspectRatio: record.aspectRatio || '16:9',
       seed: Math.floor(Math.random() * 2147483647),
     })
   }

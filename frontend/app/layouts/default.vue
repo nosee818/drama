@@ -5,12 +5,12 @@
       <div class="header-left">
         <button class="brand" @click="navigateTo('/')">
           <div class="brand-mark">
-            <img v-if="showBrandImage" :src="brandLogo" alt="火宝短剧" class="brand-logo" @error="showBrandImage = false" />
+            <img v-if="showBrandImage" :src="brandLogo" alt="VeryAI短剧平台" class="brand-logo" @error="showBrandImage = false" />
             <span v-else class="brand-fallback">火</span>
           </div>
           <div class="brand-text">
-            <span class="brand-name">火宝短剧</span>
-            <span class="brand-sub">Huobao Shorts</span>
+            <span class="brand-name">VeryAI短剧平台</span>
+            <span class="brand-sub">VeryAI Shorts</span>
           </div>
         </button>
       </div>
@@ -71,25 +71,31 @@ const showBrandImage = ref(true)
   gap: 32px;
 }
 
-.header-left { display: flex; align-items: center; }
+.header-left {
+  display: flex;
+  align-items: center;
+  min-width: 250px;
+}
 
 .brand {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 12px;
   background: none; border: none; cursor: pointer; padding: 0;
   text-decoration: none; border-radius: var(--radius);
   transition: opacity 0.15s;
+  max-width: 240px;
 }
 .brand:hover { opacity: 0.75; }
 .brand-mark {
-  width: 32px; height: 32px;
+  width: 34px; height: 34px;
+  flex: 0 0 34px;
   display: flex; align-items: center; justify-content: center;
   background: var(--bg-2); border-radius: var(--radius);
   border: 1px solid var(--border);
   overflow: hidden;
 }
 .brand-logo {
-  width: 22px;
-  height: 22px;
+  width: 25px;
+  height: 25px;
   object-fit: contain;
   display: block;
 }
@@ -100,17 +106,26 @@ const showBrandImage = ref(true)
   color: var(--accent-text);
   line-height: 1;
 }
-.brand-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1; }
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.15;
+}
 .brand-name {
   font-family: var(--font-display);
-  font-size: 15px; font-weight: 700;
+  font-size: 14px; font-weight: 700;
   color: var(--text-0);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
+  white-space: nowrap;
 }
 .brand-sub {
   font-size: 10px; font-weight: 400;
-  color: var(--text-3); margin-top: 1px;
+  color: var(--text-3); margin-top: 2px;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 /* Nav */

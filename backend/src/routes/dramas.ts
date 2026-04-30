@@ -12,6 +12,7 @@ import { generateImage } from '../services/image-generation.js'
 import { generateVideo } from '../services/video-generation.js'
 import { composeStoryboard } from '../services/ffmpeg-compose.js'
 import { mergeEpisodeVideos } from '../services/ffmpeg-merge.js'
+import { dramaOrientation, normalizeOrientation, orientationAspectRatio, orientationImageSize, orientationVideoSize, parseSize } from '../utils/aspect.js'
 
 const app = new Hono()
 
@@ -28,7 +29,7 @@ type AutoJob = {
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
   message: string
   detail?: string
-  currentStage?: AutoTarget | 'script' | 'extract'
+  currentStage?: AutoTarget | 'script' | 'extract' | 'character_images' | 'scene_images'
   currentEpisode?: number
   currentEpisodeTitle?: string
   completedEpisodes: number
@@ -58,6 +59,7 @@ async function readCreateBody(c: any) {
     description: String(form.description || '').trim(),
     genre: String(form.genre || '').trim(),
     style: normalizeStyle(String(form.style || '')),
+    orientation: normalizeOrientation(String(form.orientation || form.aspect_ratio || '')),
     total_episodes: Number(form.total_episodes || 1),
     tags: [],
   }
@@ -239,7 +241,7 @@ function markEpisodeJob(job: AutoJob, episodeNumber: number, status: 'pending' |
 }
 
 function describeTarget(target: AutoTarget) {
-  return ({ storyboard: '分镜', shot_images: '镜头图片', videos: '视频生成', compose: '最终合成' } as Record<AutoTarget, string>)[target] || target
+  return ({ storyboard: '分镜', shot_images: '镜头图片', videos: '视频生成', compose: '最终拼接' } as Record<AutoTarget, string>)[target] || target
 }
 
 function resolveAutoEpisodes(dramaId: number, endEpisode?: number | null, episodeNumbers: number[] = []) {
@@ -325,6 +327,13 @@ function getProjectTextConfigId(drama: any) {
   return Number(metadata?.ai_defaults?.text_config_id || 0) || null
 }
 
+function getProjectImageConfigId(drama: any, kind: 'character' | 'scene' | 'shot', fallback?: number | null) {
+  const metadata = drama.metadata ? safeJson(drama.metadata) : {}
+  const defaults = metadata?.ai_defaults || {}
+  const key = `${kind}_image_config_id`
+  return Number(defaults[key] || defaults.image_config_id || fallback || 0) || undefined
+}
+
 async function runEpisodeAgent(agentType: string, message: string, dramaId: number, episodeId: number, textConfigId?: number | null) {
   const agent = createAgent(agentType, episodeId, dramaId, { textConfigId })
   if (!agent) throw new Error(`Agent not found: ${agentType}`)
@@ -352,6 +361,51 @@ function getStoryboardImagePrompt(sb: any) {
     sb.atmosphere ? `氛围：${sb.atmosphere}` : '',
     '生成这个镜头的起始关键帧，突出建立关系和动作开始瞬间',
   ].filter(Boolean).join('；')
+}
+
+function buildCharacterReferencePrompt(char: any) {
+  return [
+    `角色姓名：${char.name}`,
+    char.role ? `角色定位：${char.role}` : '',
+    char.appearance ? `稳定外貌设定：${char.appearance}` : '',
+    char.description ? `人物基础设定：${char.description}` : '',
+    char.personality ? `气质性格：${char.personality}` : '',
+    '生成可跨集复用的角色设定参考图',
+    '单人，清晰正面或三分之二侧身，五官清楚，表情自然中性，完整展示发型、发色、年龄感、身高体态、服装和标志性配饰',
+    '干净背景或浅色摄影棚背景，不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊，不要多人，不要文字水印',
+  ].filter(Boolean).join('；')
+}
+
+function getEpisodeCharacters(ep: any) {
+  const links = db.select().from(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).all()
+  const ids = new Set(links.map((link: any) => link.characterId))
+  return db.select().from(schema.characters).all()
+    .filter((char: any) => ids.has(char.id) && !char.deletedAt && !/旁白| narrator/i.test(`${char.name || ''} ${char.role || ''}`))
+}
+
+function getEpisodeScenes(ep: any) {
+  const links = db.select().from(schema.episodeScenes).where(eq(schema.episodeScenes.episodeId, ep.id)).all()
+  const ids = new Set(links.map((link: any) => link.sceneId))
+  return db.select().from(schema.scenes).all()
+    .filter((scene: any) => ids.has(scene.id) && !scene.deletedAt)
+}
+
+function getStoryboardReferenceImages(sb: any) {
+  const refs: string[] = []
+  const pushRef = (value?: string | null) => {
+    if (!value || refs.includes(value) || refs.length >= 8) return
+    refs.push(value)
+  }
+  if (sb.sceneId) {
+    const [scene] = db.select().from(schema.scenes).where(eq(schema.scenes.id, sb.sceneId)).all()
+    pushRef(scene?.imageUrl)
+  }
+  const charLinks = db.select().from(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
+  for (const link of charLinks as any[]) {
+    const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, link.characterId)).all()
+    pushRef(char?.imageUrl)
+  }
+  return refs
 }
 
 async function ensureScriptAndContext(ep: any, drama: any, textConfigId?: number | null) {
@@ -402,16 +456,66 @@ async function ensureStoryboards(ep: any, drama: any, textConfigId?: number | nu
   )
 }
 
+async function ensureCharacterImages(ep: any, drama: any) {
+  const characters = getEpisodeCharacters(ep)
+  for (const char of characters) {
+    if (char.imageUrl) continue
+    const genId = await generateImage({
+      characterId: char.id,
+      dramaId: drama.id,
+      prompt: buildCharacterReferencePrompt(char),
+      size: orientationImageSize(dramaOrientation(drama)),
+      configId: getProjectImageConfigId(drama, 'character', ep.imageConfigId),
+    })
+    await waitFor(
+      () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
+      row => row?.status === 'completed' || row?.status === 'failed',
+      `第${ep.episodeNumber}集 角色${char.name}形象`,
+      180,
+      3000,
+    )
+    const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
+    if (record?.status === 'failed') throw new Error(record.errorMsg || `角色${char.name}形象生成失败`)
+  }
+}
+
+async function ensureSceneImages(ep: any, drama: any) {
+  const scenes = getEpisodeScenes(ep)
+  for (const scene of scenes) {
+    if (scene.imageUrl) continue
+    db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, scene.id)).run()
+    const genId = await generateImage({
+      sceneId: scene.id,
+      dramaId: drama.id,
+      prompt: scene.prompt || `${scene.location}，${scene.time || ''}，高质量场景图，电影感，清晰空间结构和光线氛围`,
+      size: orientationImageSize(dramaOrientation(drama)),
+      configId: getProjectImageConfigId(drama, 'scene', ep.imageConfigId),
+    })
+    await waitFor(
+      () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
+      row => row?.status === 'completed' || row?.status === 'failed',
+      `第${ep.episodeNumber}集 场景${scene.location}图片`,
+      180,
+      3000,
+    )
+    const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
+    if (record?.status === 'failed') throw new Error(record.errorMsg || `场景${scene.location}图片生成失败`)
+  }
+}
+
 async function ensureShotImages(ep: any, drama: any) {
   const storyboards = getEpisodeStoryboards(ep.id)
   for (const sb of storyboards) {
     if (sb.firstFrameImage || sb.composedImage) continue
+    const referenceImages = getStoryboardReferenceImages(sb)
     const genId = await generateImage({
       storyboardId: sb.id,
       dramaId: drama.id,
       prompt: getStoryboardImagePrompt(sb),
+      size: orientationImageSize(dramaOrientation(drama)),
       frameType: 'first_frame',
-      configId: ep.imageConfigId ?? undefined,
+      referenceImages: referenceImages.length ? referenceImages : undefined,
+      configId: getProjectImageConfigId(drama, 'shot', ep.imageConfigId),
     })
     await waitFor(
       () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
@@ -427,27 +531,40 @@ async function ensureShotImages(ep: any, drama: any) {
 
 async function ensureVideos(ep: any, drama: any) {
   const storyboards = getEpisodeStoryboards(ep.id)
-  for (const sb of storyboards) {
-    if (sb.videoUrl) continue
+  const pending = storyboards.filter((sb: any) => !sb.videoUrl)
+  if (!pending.length) return
+  const orientation = dramaOrientation(drama)
+  const { width, height } = parseSize(orientationVideoSize(orientation), '1280x720')
+  const aspectRatio = orientationAspectRatio(orientation)
+  const tasks: Array<{ sb: any; genId: number }> = []
+
+  for (const sb of pending) {
     const first = sb.firstFrameImage || sb.composedImage || ''
     const genId = await generateVideo({
       storyboardId: sb.id,
       dramaId: drama.id,
       prompt: sb.videoPrompt || sb.description || sb.title || '',
       duration: Number(sb.duration || 5),
+      aspectRatio,
+      width,
+      height,
       referenceMode: first ? 'single' : 'none',
       imageUrl: first || undefined,
       configId: ep.videoConfigId ?? undefined,
     })
+    tasks.push({ sb, genId })
+  }
+
+  for (const task of tasks) {
     await waitFor(
-      () => db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, genId)).all()[0],
+      () => db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, task.genId)).all()[0],
       row => row?.status === 'completed' || row?.status === 'failed',
-      `第${ep.episodeNumber}集 镜头${sb.storyboardNumber}视频`,
+      `第${ep.episodeNumber}集 镜头${task.sb.storyboardNumber}视频`,
       240,
       4000,
     )
-    const [record] = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, genId)).all()
-    if (record?.status === 'failed') throw new Error(record.errorMsg || `镜头${sb.storyboardNumber}视频生成失败`)
+    const [record] = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, task.genId)).all()
+    if (record?.status === 'failed') throw new Error(record.errorMsg || `镜头${task.sb.storyboardNumber}视频生成失败`)
   }
 }
 
@@ -456,6 +573,7 @@ async function ensureComposed(ep: any, drama: any) {
   for (const sb of storyboards) {
     if (sb.composedVideoUrl) continue
     if (!sb.videoUrl) throw new Error(`第${ep.episodeNumber}集 镜头${sb.storyboardNumber}没有视频，无法合成`)
+    if (!sb.ttsAudioUrl) continue
     await composeStoryboard(sb.id)
   }
 
@@ -511,8 +629,16 @@ async function runAutoJob(job: AutoJob) {
     }
     if (targetReached(job.target, 'shot_images')) {
       await waitIfPaused(job)
-      updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在生成镜头图片` })
-      addJobLog(job, '正在生成镜头图片', ep.episodeNumber, 'shot_images')
+      updateJob(job, { currentStage: 'character_images', detail: `第 ${ep.episodeNumber} 集：正在生成角色形象` })
+      addJobLog(job, '正在生成角色形象', ep.episodeNumber, 'character_images')
+      await ensureCharacterImages(ep, drama)
+      await waitIfPaused(job)
+      updateJob(job, { currentStage: 'scene_images', detail: `第 ${ep.episodeNumber} 集：正在生成场景图片` })
+      addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
+      await ensureSceneImages(ep, drama)
+      await waitIfPaused(job)
+      updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在基于角色和场景参考图生成镜头图片` })
+      addJobLog(job, '正在基于角色和场景参考图生成镜头图片', ep.episodeNumber, 'shot_images')
       await ensureShotImages(ep, drama)
     }
     if (targetReached(job.target, 'videos')) {
@@ -523,8 +649,8 @@ async function runAutoJob(job: AutoJob) {
     }
     if (targetReached(job.target, 'compose')) {
       await waitIfPaused(job)
-      updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在合成视频` })
-      addJobLog(job, '正在合成视频', ep.episodeNumber, 'compose')
+      updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在执行视频配音合成；无配音镜头会跳过` })
+      addJobLog(job, '正在执行视频配音合成；无配音镜头会跳过', ep.episodeNumber, 'compose')
       await ensureComposed(ep, drama)
     }
     markEpisodeJob(job, ep.episodeNumber, 'completed', `已生成到${describeTarget(job.target)}`, job.target)
@@ -593,6 +719,7 @@ app.post('/', async (c) => {
   const ts = now()
   const totalEpisodes = Math.max(1, Math.min(100, Number(body.total_episodes || 1)))
   const episodeContents = splitImportedText(importedText, totalEpisodes)
+  const orientation = normalizeOrientation(body.orientation || (body.metadata ? safeJson(String(body.metadata)).orientation : ''))
   const res = db.insert(schema.dramas).values({
     title: body.title,
     description: body.description,
@@ -602,6 +729,9 @@ app.post('/', async (c) => {
     tags: body.tags ? JSON.stringify(body.tags) : null,
     metadata: JSON.stringify({
       ...(body.metadata ? typeof body.metadata === 'string' ? safeJson(body.metadata) : body.metadata : {}),
+      orientation,
+      aspect_ratio: orientationAspectRatio(orientation),
+      image_size: orientationImageSize(orientation),
       source_file: sourceFileName || undefined,
       import_text_length: importedText.length || undefined,
       import_episode_count: episodeContents.length || undefined,

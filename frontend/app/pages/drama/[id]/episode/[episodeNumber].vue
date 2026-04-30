@@ -1,5 +1,5 @@
 <template>
-  <div class="studio" v-if="drama">
+  <div :class="['studio', `is-${projectOrientation}`]" v-if="drama">
     <header class="studio-topbar">
       <div class="studio-topbar-main">
         <button class="back-btn topbar-back" @click="navigateTo(`/drama/${dramaId}`)">
@@ -485,6 +485,13 @@
                   </div>
                   <div class="shot-body">
                     <div class="shot-desc">{{ sb.description || sb.title || '无描述' }}</div>
+                    <div class="reference-strip compact" v-if="getShotReferenceAssets(sb).length">
+                      <span
+                        v-for="asset in getShotReferenceAssets(sb)"
+                        :key="`${sb.id}-${asset.type}-${asset.label}`"
+                        :class="['reference-chip', asset.ready ? 'is-ready' : 'is-missing']"
+                      >{{ asset.label }}</span>
+                    </div>
                   </div>
                   <div class="shot-meta">
                     <span class="mono dim" style="font-size:10px">{{ sb.duration || 10 }}s</span>
@@ -520,6 +527,15 @@
                       <span class="tag" :class="getFirstFrame(selectedSb) ? 'tag-success' : ''">首帧 {{ getFirstFrame(selectedSb) ? '已生成' : '待生成' }}</span>
                       <span class="tag" :class="getLastFrame(selectedSb) ? 'tag-success' : ''">尾帧 {{ getLastFrame(selectedSb) ? '已生成' : '待生成' }}</span>
                       <span class="tag" :class="hasVid(selectedSb) ? 'tag-success' : ''">视频 {{ hasVid(selectedSb) ? '已生成' : '待生成' }}</span>
+                    </div>
+                    <div class="reference-strip" v-if="getShotReferenceAssets(selectedSb).length">
+                      <span class="reference-label">引用资产</span>
+                      <span
+                        v-for="asset in getShotReferenceAssets(selectedSb)"
+                        :key="`${selectedSb.id}-${asset.type}-${asset.label}`"
+                        :class="['reference-chip', asset.ready ? 'is-ready' : 'is-missing']"
+                        :title="asset.ready ? '会作为参考图传入生图接口' : '尚未生成，暂时不会传入参考图'"
+                      >{{ asset.label }}</span>
                     </div>
                   </div>
                   <div class="detail-preview-grid">
@@ -783,7 +799,7 @@
           <div v-if="prodTab === 'chars'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ visualChars.length }} 个需生成形象角色</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
+              <span class="tag">{{ characterImageConfigLabel }}</span>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchCharImages">
@@ -833,7 +849,7 @@
           <div v-else-if="prodTab === 'scenes'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ scenes.length }} 个场景</span>
-              <span class="tag">{{ lockedImageConfigLabel }}</span>
+              <span class="tag">{{ sceneImageConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchSceneImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
@@ -1299,13 +1315,13 @@
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
                   <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
                   <label class="prompt-edit-block">
-                    <span>镜头图片提示词</span>
+                    <span>视频生成提示词</span>
                     <textarea
-                      :value="sb.image_prompt || sb.imagePrompt || sb.description || ''"
+                      :value="sb.video_prompt || sb.videoPrompt || ''"
                       class="mini-textarea"
                       rows="4"
-                      placeholder="用于首帧、尾帧和镜头图..."
-                      @blur="updateField(sb, 'image_prompt', $event.target.value)"
+                      placeholder="描述动作、镜头运动和时间节奏..."
+                      @blur="updateField(sb, 'video_prompt', $event.target.value)"
                     />
                   </label>
                   <div class="prod-dots">
@@ -1328,11 +1344,12 @@
           <div v-else-if="prodTab === 'compose'" class="prod-content">
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
-              <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
+              <span class="tag mono" v-if="voiceComposeRequiredCount">{{ voiceComposedCount }}/{{ voiceComposeRequiredCount }} 已配音合成</span>
+              <span class="tag mono" v-else>无配音，可跳过</span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchCompose">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  批量合成
+                  批量配音合成
                 </button>
               </div>
             </div>
@@ -1365,32 +1382,39 @@
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   </div>
                   <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
-                  <span v-if="hasComposed(sb)" class="prod-overlay-badge">已合成</span>
+                  <span v-if="hasComposed(sb)" class="prod-overlay-badge">已配音合成</span>
                 </div>
                 <div class="prod-info">
                   <div class="prod-desc truncate">{{ sb.description || sb.title || '—' }}</div>
                   <div class="prod-meta-line">{{ sb.shot_type || sb.shotType || '未设景别' }} · {{ sb.duration || 10 }}s</div>
-                  <label class="prompt-edit-block">
-                    <span>视频生成提示词</span>
-                    <textarea
-                      :value="sb.video_prompt || sb.videoPrompt || ''"
-                      class="mini-textarea"
-                      rows="4"
-                      placeholder="描述动作、镜头运动和时间节奏..."
-                      @blur="updateField(sb, 'video_prompt', $event.target.value)"
-                    />
-                  </label>
+                  <div class="compose-inputs">
+                    <div class="compose-input-row">
+                      <span :class="['dot', hasVid(sb) && 'ok']" />
+                      <span>镜头视频</span>
+                      <b>{{ hasVid(sb) ? '已生成' : '待生成' }}</b>
+                    </div>
+                    <div class="compose-input-row">
+                      <span :class="['dot', hasTTS(sb) && 'ok']" />
+                      <span>配音音频</span>
+                      <b>{{ hasTTS(sb) ? '已生成' : '可跳过' }}</b>
+                    </div>
+                    <div class="compose-input-row">
+                      <span :class="['dot', hasComposed(sb) && 'ok', isPendingCompose(sb.id) && 'pending']" />
+                      <span>配音合成</span>
+                      <b>{{ !hasTTS(sb) ? '无配音跳过' : (isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '已合成' : '待合成')) }}</b>
+                    </div>
+                  </div>
                   <div class="prod-dots">
                     <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">视频</span>
                     <span :class="['dot', hasTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
-                    <span :class="['dot', hasComposed(sb) && 'ok', isPendingCompose(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingCompose(sb.id) ? '合成中' : '合成' }}</span>
+                    <span :class="['dot', (hasComposed(sb) || !hasTTS(sb)) && 'ok', isPendingCompose(sb.id) && 'pending']" /><span style="font-size:10px">{{ !hasTTS(sb) ? '跳过' : (isPendingCompose(sb.id) ? '合成中' : '配音合成') }}</span>
                   </div>
                   <div v-if="composeFailMessage(sb.id)" class="prod-error">{{ composeFailMessage(sb.id) }}</div>
                 </div>
                 <div class="prod-actions">
-                  <button class="btn btn-sm" :disabled="!hasVid(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
+                  <button class="btn btn-sm" :disabled="!hasVid(sb) || !hasTTS(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                    {{ isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '重新合成' : '开始合成') }}
+                    {{ !hasTTS(sb) ? '无配音跳过' : (isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '重新配音合成' : '开始配音合成')) }}
                   </button>
                 </div>
               </div>
@@ -1418,7 +1442,11 @@
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <a :href="'/' + mergeUrl" download class="btn btn-primary ml-auto">
+                <button class="btn btn-ghost ml-auto" :disabled="!canExport || mergeRunning" @click="doMerge">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+                  {{ mergeRunning ? '拼接中' : '重新拼接' }}
+                </button>
+                <a :href="'/' + mergeUrl" download class="btn btn-primary">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
@@ -1430,10 +1458,10 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
                 <div class="empty-title">拼接全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
-                <button class="btn btn-primary" :disabled="composedCount === 0" @click="doMerge" style="margin-top:12px">
+                <div class="empty-desc">将 {{ mergeReadyCount }} 个可用镜头拼接为完整视频。已配音合成的镜头优先使用合成片段，无配音镜头直接使用原始视频。</div>
+                <button class="btn btn-primary" :disabled="!canExport || mergeRunning" @click="doMerge" style="margin-top:12px">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  开始拼接
+                  {{ mergeRunning ? '拼接中' : '开始拼接' }}
                 </button>
               </div>
             </template>
@@ -1555,7 +1583,11 @@ const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
+const voiceComposeRequiredCount = computed(() => sbs.value.filter(s => hasVid(s) && hasTTS(s)).length)
+const voiceComposedCount = computed(() => sbs.value.filter(s => hasTTS(s) && hasComposed(s)).length)
+const mergeReadyCount = computed(() => sbs.value.filter(s => hasComposed(s) || hasVid(s)).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+const mergeRunning = computed(() => mergeData.value?.status === 'processing')
 const audioSkipped = ref(false)
 const audioSkipStorageKey = computed(() => `huobao:skip-audio:${dramaId}:${episodeNumber}`)
 const voiceStepDone = computed(() => !!chars.value.length && (audioSkipped.value || charsVoiced.value === chars.value.length))
@@ -1617,6 +1649,17 @@ function parseMetadata(value) {
   if (typeof value === 'object') return value
   try { return JSON.parse(value) || {} } catch { return {} }
 }
+
+function normalizeOrientation(value) {
+  const text = String(value || '').toLowerCase().trim()
+  if (['landscape', 'horizontal', '16:9', 'wide', '横屏'].includes(text)) return 'landscape'
+  return 'portrait'
+}
+
+const projectOrientation = computed(() => {
+  const metadata = parseMetadata(drama.value?.metadata)
+  return normalizeOrientation(metadata.orientation || metadata.aspect_ratio)
+})
 
 function dramaTextDefaultConfigId() {
   return parseMetadata(drama.value?.metadata).ai_defaults?.text_config_id || null
@@ -1752,10 +1795,17 @@ const lockedImageConfigId = computed(() => episode.value?.image_config_id || epi
 const lockedVideoConfigId = computed(() => episode.value?.video_config_id || episode.value?.videoConfigId || null)
 const lockedAudioConfigId = computed(() => episode.value?.audio_config_id || episode.value?.audioConfigId || null)
 const lockedAudioProvider = computed(() => audioConfigs.value.find(c => c.id === lockedAudioConfigId.value)?.provider || '')
-const activeImageConfig = computed(() => preferredConfig(imageConfigs.value, lockedImageConfigId.value))
+const projectImageDefaults = computed(() => parseMetadata(drama.value?.metadata).ai_defaults || {})
+const activeCharacterImageConfig = computed(() => preferredConfig(imageConfigs.value, projectImageDefaults.value.character_image_config_id || projectImageDefaults.value.image_config_id || lockedImageConfigId.value))
+const activeSceneImageConfig = computed(() => preferredConfig(imageConfigs.value, projectImageDefaults.value.scene_image_config_id || projectImageDefaults.value.image_config_id || lockedImageConfigId.value))
+const activeShotImageConfig = computed(() => preferredConfig(imageConfigs.value, projectImageDefaults.value.shot_image_config_id || projectImageDefaults.value.image_config_id || lockedImageConfigId.value))
+const activeImageConfig = activeShotImageConfig
 const activeVideoConfig = computed(() => preferredConfig(videoConfigs.value, lockedVideoConfigId.value))
 const activeAudioConfig = computed(() => preferredConfig(audioConfigs.value, lockedAudioConfigId.value))
-const lockedImageConfigLabel = computed(() => configLabel(activeImageConfig.value))
+const lockedImageConfigLabel = computed(() => configLabel(activeShotImageConfig.value))
+const characterImageConfigLabel = computed(() => configLabel(activeCharacterImageConfig.value))
+const sceneImageConfigLabel = computed(() => configLabel(activeSceneImageConfig.value))
+const shotImageConfigLabel = computed(() => configLabel(activeShotImageConfig.value))
 const lockedVideoConfigLabel = computed(() => configLabel(activeVideoConfig.value))
 const lockedAudioConfigLabel = computed(() => configLabel(activeAudioConfig.value))
 
@@ -1935,10 +1985,10 @@ function prodStepDone(id) {
   if (id === 'dubbing') return !!sbs.value.length && dubbingStepDone.value
   if (id === 'shots') return !!sbs.value.length && shotImgCount.value === sbs.value.length
   if (id === 'videos') return !!sbs.value.length && shotVidCount.value === sbs.value.length
-  if (id === 'compose') return !!sbs.value.length && composedCount.value === sbs.value.length
+  if (id === 'compose') return !!sbs.value.length && shotVidCount.value === sbs.value.length && (!voiceComposeRequiredCount.value || voiceComposedCount.value === voiceComposeRequiredCount.value)
   return false
 }
-const canExport = computed(() => !!sbs.value.length && composedCount.value === sbs.value.length)
+const canExport = computed(() => !!sbs.value.length && mergeReadyCount.value === sbs.value.length)
 function goNextProd() {
   if (prodTabIdx.value < prodTabDefs.value.length - 1) {
     prodTabIdx.value++
@@ -2263,7 +2313,7 @@ const prodTabDefs = computed(() => [
   { id: 'dubbing', label: '配音生成', icon: Mic2, badge: '' },
   { id: 'shots', label: '镜头图片', icon: ImageIcon, badge: shotImgCount.value ? `${shotImgCount.value}/${sbs.value.length}` : '' },
   { id: 'videos', label: '视频生成', icon: Video, badge: shotVidCount.value ? `${shotVidCount.value}/${sbs.value.length}` : '' },
-  { id: 'compose', label: '视频合成', icon: Layers, badge: composedCount.value ? `${composedCount.value}/${sbs.value.length}` : '' },
+  { id: 'compose', label: '视频配音合成', icon: Layers, badge: voiceComposeRequiredCount.value ? `${voiceComposedCount.value}/${voiceComposeRequiredCount.value}` : '可跳过' },
 ])
 
 const mainStageDefs = [
@@ -2294,7 +2344,7 @@ const sidebarSections = computed(() => ([
       { key: 'prod:dubbing', label: '配音生成', desc: '', icon: Mic2, done: prodStepDone('dubbing') },
       { key: 'prod:shots', label: '镜头图片', desc: '', icon: ImageIcon, done: prodStepDone('shots') },
       { key: 'prod:videos', label: '视频生成', desc: '', icon: Video, done: prodStepDone('videos') },
-      { key: 'prod:compose', label: '视频合成', desc: '', icon: Layers, done: prodStepDone('compose') },
+      { key: 'prod:compose', label: '视频配音合成', desc: '', icon: Layers, done: prodStepDone('compose') },
     ],
   },
   {
@@ -2330,7 +2380,7 @@ function mainStageDone(stageId) {
     return ttsReady
       && shotImgCount.value === sbs.value.length
       && shotVidCount.value === sbs.value.length
-      && composedCount.value === sbs.value.length
+      && prodStepDone('compose')
   }
   if (stageId === 'export') return !!mergeUrl.value
   return false
@@ -2388,7 +2438,7 @@ const activeSubSteps = computed(() => {
       { key: 'prod:dubbing', label: '配音生成', done: dubbingStepDone.value },
       { key: 'prod:shots', label: '镜头图片', done: !!sbs.value.length && shotImgCount.value === sbs.value.length },
       { key: 'prod:videos', label: '视频生成', done: !!sbs.value.length && shotVidCount.value === sbs.value.length },
-      { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
+      { key: 'prod:compose', label: '视频配音合成', done: prodStepDone('compose') },
     ]
   }
   return [
@@ -2472,7 +2522,7 @@ const pipelineProgress = computed(() => {
   if (sbs.value.length && dubbingStepDone.value) p++
   if (sbs.value.some(s => s.composed_image || s.composedImage)) p++
   if (sbs.value.some(s => s.video_url || s.videoUrl)) p++
-  if (sbs.value.length && composedCount.value === sbs.value.length) p++
+  if (sbs.value.length && prodStepDone('compose')) p++
   if (mergeUrl.value) p++
   return p
 })
@@ -2763,7 +2813,7 @@ function watchImageGeneration(genId, onDone, onFailed, attempts = 120, delay = 3
 async function genCharImg(id) {
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
-    await characterAPI.generateImage(id, epId.value)
+    await characterAPI.generateImage(id, epId.value, activeCharacterImageConfig.value?.id)
     toast.success('角色图片生成中')
     await refresh()
     watchAsyncResult(() => {
@@ -2781,7 +2831,7 @@ function batchCharImages() {
   const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
   if (!ids.length) { toast.info('所有角色图片已生成'); return }
   pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
-  characterAPI.batchImages(ids, epId.value).then(async () => {
+  characterAPI.batchImages(ids, epId.value, activeCharacterImageConfig.value?.id).then(async () => {
     toast.success('角色图片批量生成中')
     await refresh()
     watchAsyncResult(() => ids.every(id => {
@@ -2798,7 +2848,7 @@ function batchCharImages() {
 async function genSceneImg(id) {
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
-    const res = await sceneAPI.generateImage(id, epId.value)
+    const res = await sceneAPI.generateImage(id, epId.value, activeSceneImageConfig.value?.id)
     toast.success('场景图片生成中')
     await refresh()
     const finishPending = () => {
@@ -2827,7 +2877,7 @@ function batchSceneImages() {
   const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
   if (!ids.length) { toast.info('所有场景图片已生成'); return }
   pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
-  ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e.message)) })
+  ids.forEach(id => { sceneAPI.generateImage(id, epId.value, activeSceneImageConfig.value?.id).then(() => refresh()).catch(e => toast.error(e.message)) })
   toast.success('场景图片批量生成中')
   watchAsyncResult(() => ids.every(id => {
     const scene = scenes.value.find(s => s.id === id)
@@ -2908,26 +2958,35 @@ function hasVid(s) { return !!getVideoUrl(s) }
 function hasComposed(s) { return !!getComposedVideoUrl(s) }
 
 function getShotReferenceImages(sb) {
+  return getShotReferenceAssets(sb).map(item => item.path).filter(Boolean).slice(0, 6)
+}
+
+function getShotReferenceAssets(sb) {
   const refs = []
-  const pushRef = (value) => {
-    if (!value || refs.includes(value) || refs.length >= 6) return
-    refs.push(value)
+  const pushRef = (asset) => {
+    if (!asset?.label || refs.length >= 8) return
+    const duplicate = refs.some(item => {
+      if (asset.path && item.path) return item.path === asset.path
+      return item.type === asset.type && item.label === asset.label
+    })
+    if (duplicate) return
+    refs.push(asset)
   }
   const sceneId = sb?.scene_id || sb?.sceneId
   const scene = scenes.value.find(item => item.id === sceneId)
-  pushRef(scene?.image_url || scene?.imageUrl)
+  pushRef({ type: 'scene', label: `@${scene?.location || '场景'}`, path: scene?.image_url || scene?.imageUrl, ready: !!(scene?.image_url || scene?.imageUrl) })
   for (const charId of getStoryboardCharacterIds(sb)) {
     const char = chars.value.find(item => item.id === charId)
-    pushRef(char?.image_url || char?.imageUrl)
+    pushRef({ type: 'character', label: `@${char?.name || '角色'}`, path: char?.image_url || char?.imageUrl, ready: !!(char?.image_url || char?.imageUrl) })
   }
-  for (const ref of getRefs(sb)) {
-    pushRef(ref)
+  for (const [index, refPath] of getRefs(sb).entries()) {
+    pushRef({ type: 'manual', label: `@参考${index + 1}`, path: refPath, ready: !!refPath })
   }
   const first = getFirstFrame(sb)
   const last = getLastFrame(sb)
-  pushRef(first)
-  pushRef(last)
-  return refs.filter(Boolean).slice(0, 6)
+  pushRef({ type: 'frame', label: '@首帧', path: first, ready: !!first })
+  pushRef({ type: 'frame', label: '@尾帧', path: last, ready: !!last })
+  return refs
 }
 
 function buildShotImagePrompt(sb, frameType) {
@@ -2971,7 +3030,7 @@ async function genShotFrame(sb, frameType) {
       drama_id: dramaId,
       prompt,
       frame_type: frameType,
-      config_id: activeImageConfig.value?.id,
+      config_id: activeShotImageConfig.value?.id,
       reference_images: referenceImages.length ? referenceImages : undefined,
     }
     await imageAPI.generate(body)
@@ -3054,11 +3113,15 @@ async function pollVideoGeneration(generationId, storyboardId) {
   toast.error('视频生成超时')
 }
 async function doCompose(sb) {
+  if (!hasTTS(sb)) {
+    toast.info('该镜头没有配音，已跳过视频配音合成')
+    return
+  }
   try {
     delete failedComposeMessages.value[sb.id]
     if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
     await composeAPI.shot(sb.id)
-    toast.success('合成完成')
+    toast.success('视频配音合成完成')
     pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
     refresh()
   } catch (e) {
@@ -3087,18 +3150,29 @@ function batchVideos() {
   }
 }
 async function batchCompose() {
+  const targets = sbs.value.filter(sb => hasVid(sb) && hasTTS(sb))
+  if (!targets.length) {
+    toast.info('没有需要视频配音合成的镜头，无配音镜头会直接参与最终拼接')
+    return
+  }
   await composeAPI.all(epId.value)
-  pendingComposeIds.value = [...new Set(sbs.value.filter(sb => !!sb.video_url || !!sb.videoUrl).map(sb => sb.id))]
-  toast.success('批量合成已开始')
+  pendingComposeIds.value = [...new Set(targets.map(sb => sb.id))]
+  toast.success('批量视频配音合成已开始')
   pollComposeStatus()
 }
 async function doMerge() {
-  await mergeAPI.merge(epId.value); toast.success('拼接中...')
+  if (!canExport.value) {
+    toast.warning('请先生成所有镜头视频')
+    return
+  }
+  const previousMergeUrl = mergeUrl.value
+  mergeData.value = { ...(mergeData.value || {}), status: 'processing', merged_url: previousMergeUrl }
+  await mergeAPI.merge(epId.value); toast.success(previousMergeUrl ? '正在重新拼接成片...' : '拼接中...')
   const poll = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
     if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
       clearInterval(poll)
-      mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error('拼接失败')
+      mergeData.value.status === 'completed' ? toast.success(previousMergeUrl ? '重新拼接完成' : '拼接完成') : toast.error('拼接失败')
     }
   }, 3000)
 }
@@ -3117,14 +3191,14 @@ async function pollComposeStatus() {
       if (failedItems.length) {
         const next = { ...failedComposeMessages.value }
         failedItems.forEach((item) => {
-          next[item.id] = item.error_msg || item.errorMsg || '视频合成失败'
+          next[item.id] = item.error_msg || item.errorMsg || '视频配音合成失败'
         })
         failedComposeMessages.value = next
       }
 
       if (!processingIds.length) {
-        if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头合成失败`)
-        else toast.success('批量合成完成')
+        if (failedItems.length) toast.error(`有 ${failedItems.length} 个镜头视频配音合成失败`)
+        else toast.success('批量视频配音合成完成')
         return
       }
     } catch {}
@@ -3187,6 +3261,9 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 <style scoped>
 /* ===== Studio Layout ===== */
 .studio {
+  --project-aspect: 9/16;
+  --frame-thumb-width: 76px;
+  --latest-grid-thumb-width: 46px;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -3197,6 +3274,11 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
     radial-gradient(circle at top left, rgba(255,255,255,0.7), transparent 28%),
     linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0)),
     var(--bg-base);
+}
+.studio.is-landscape {
+  --project-aspect: 16/9;
+  --frame-thumb-width: 130px;
+  --latest-grid-thumb-width: 72px;
 }
 
 .studio-topbar {
@@ -3775,6 +3857,44 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .shot-body { }
 .shot-desc { font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-1); }
 .shot-item.active .shot-desc { color: var(--text-0); }
+.reference-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.reference-strip.compact {
+  gap: 4px;
+  margin-top: 6px;
+}
+.reference-label {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 700;
+}
+.reference-chip {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(76,125,255,0.18);
+  background: rgba(76,125,255,0.08);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+}
+.reference-strip.compact .reference-chip {
+  min-height: 19px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+.reference-chip.is-missing {
+  border-color: rgba(148,163,184,0.24);
+  background: rgba(148,163,184,0.08);
+  color: var(--text-3);
+}
 .shot-meta { display: flex; align-items: center; gap: 6px; }
 .shot-location {
   font-size: 10px;
@@ -3816,11 +3936,11 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .detail-preview-card { display: flex; flex-direction: column; gap: 6px; }
 .detail-preview-title { font-size: 11px; font-weight: 700; color: var(--text-2); }
 .detail-preview-media {
-  position: relative; aspect-ratio: 16/9; overflow: hidden;
+  position: relative; aspect-ratio: var(--project-aspect, 16/9); overflow: hidden;
   border-radius: 14px; background: rgba(18,25,42,0.08);
   border: 1px solid rgba(27, 41, 64, 0.08);
 }
-.detail-preview-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.detail-preview-media img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .detail-preview-empty {
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   color: var(--text-3); font-size: 12px;
@@ -3933,9 +4053,9 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), border-color 0.18s var(--ease-out);
 }
 .asset-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
-.asset-cover { position: relative; aspect-ratio: 1; background: var(--bg-2); overflow: hidden; }
-.asset-cover.wide { aspect-ratio: 16/9; }
-.asset-cover img { width: 100%; height: 100%; object-fit: cover; }
+.asset-cover { position: relative; aspect-ratio: var(--project-aspect, 16/9); background: var(--bg-2); overflow: hidden; }
+.asset-cover.wide { aspect-ratio: var(--project-aspect, 16/9); }
+.asset-cover img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .previewable-image { cursor: zoom-in; transition: transform 0.18s var(--ease-out), filter 0.18s var(--ease-out); }
 .previewable-image:hover { transform: scale(1.015); filter: saturate(1.04); }
 .asset-cover-badge {
@@ -3992,6 +4112,29 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   border-color: rgba(78, 112, 255, 0.48);
   box-shadow: 0 0 0 3px rgba(78, 112, 255, 0.10);
 }
+.compose-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 78px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(27, 41, 64, 0.10);
+  border-radius: 8px;
+  background: rgba(246, 248, 252, 0.72);
+}
+.compose-input-row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.compose-input-row b {
+  font-weight: 700;
+  color: var(--text-1);
+}
 .asset-foot { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
 
 /* Frame grid */
@@ -4032,13 +4175,13 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .frame-thumb-wrap { display: flex; flex-direction: column; gap: 3px; align-items: center; }
 .frame-thumb-label { font-size: 10px; font-weight: 600; color: var(--text-3); }
 .frame-thumb {
-  position: relative; width: 130px; aspect-ratio: 16/9;
+  position: relative; width: var(--frame-thumb-width, 130px); aspect-ratio: var(--project-aspect, 16/9);
   border-radius: 6px; overflow: hidden;
   background: var(--bg-2); cursor: pointer;
   transition: all 0.15s; border: 1.5px solid var(--border);
 }
 .frame-thumb:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
-.frame-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.frame-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .frame-thumb-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
 .frame-re {
   position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
@@ -4063,9 +4206,9 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58));
 }
 .prod-card:hover { transform: translateY(-2px); box-shadow: 0 16px 30px rgba(20, 32, 54, 0.08); }
-.prod-cover { position: relative; aspect-ratio: 16/9; background: var(--bg-2); overflow: hidden; }
-.prod-cover img { width: 100%; height: 100%; object-fit: cover; }
-.prod-video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
+.prod-cover { position: relative; aspect-ratio: var(--project-aspect, 16/9); background: var(--bg-2); overflow: hidden; }
+.prod-cover img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.prod-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
 .prod-cover-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
 .prod-idx {
   position: absolute; top: 5px; left: 5px; font-size: 10px; font-weight: 700;
@@ -4129,6 +4272,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   display: block;
   max-width: 100%;
   max-height: calc(100vh - 140px);
+  object-fit: contain;
   border-radius: 18px;
   box-shadow: 0 18px 48px rgba(8, 14, 24, 0.22);
   background: rgba(255,255,255,0.9);
@@ -4380,7 +4524,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 }
 .grid-history-thumb {
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--project-aspect, 16/9);
   overflow: hidden;
   border-radius: 12px;
   border: 1px solid rgba(27, 41, 64, 0.08);
@@ -4389,7 +4533,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .grid-history-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
 }
 .grid-history-copy {
@@ -4413,7 +4557,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 
 .latest-grid-strip {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
+  grid-template-columns: var(--latest-grid-thumb-width, 46px) minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
@@ -4422,8 +4566,8 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.62));
 }
 .latest-grid-strip-thumb {
-  width: 72px;
-  height: 48px;
+  width: var(--latest-grid-thumb-width, 46px);
+  aspect-ratio: var(--project-aspect, 9/16);
   padding: 0;
   border: 1px solid rgba(27, 41, 64, 0.08);
   border-radius: 10px;
@@ -4435,7 +4579,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .latest-grid-strip-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
 }
 .latest-grid-strip-copy {
@@ -4475,7 +4619,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 /* Export */
 .export-split { flex: 1; display: flex; min-height: 0; }
 .export-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; }
-.export-video { max-width: 720px; width: 100%; border-radius: var(--radius-lg); background: #000; }
+.export-video { max-width: 720px; width: 100%; aspect-ratio: var(--project-aspect, 16/9); object-fit: contain; border-radius: var(--radius-lg); background: #000; }
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
 .export-list { width: 240px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -4638,7 +4782,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   .latest-grid-strip-thumb {
     width: 100%;
     height: auto;
-    aspect-ratio: 16 / 9;
+    aspect-ratio: var(--project-aspect, 9/16);
   }
 
   .latest-grid-strip-actions {

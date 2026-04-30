@@ -22,7 +22,8 @@ function toAbsPath(relativePath: string): string {
 }
 
 /**
- * 拼接一集的所有合成镜头视频
+ * 拼接一集的所有镜头视频。
+ * 有配音合成片段时优先使用 composedVideoUrl；没有配音的镜头直接使用 videoUrl。
  */
 export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Promise<number> {
   const storyboards = db.select().from(schema.storyboards)
@@ -30,12 +31,13 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
     .orderBy(schema.storyboards.storyboardNumber)
     .all()
 
-  const composedStoryboards = storyboards.filter(sb => !!sb.composedVideoUrl)
-  if (composedStoryboards.length !== storyboards.length) {
-    throw new Error(`Only composed storyboards can be merged (${composedStoryboards.length}/${storyboards.length} ready)`)
+  const selectMergeSource = (sb: any) => sb.ttsAudioUrl && sb.composedVideoUrl ? sb.composedVideoUrl : sb.videoUrl
+  const readyStoryboards = storyboards.filter(sb => !!selectMergeSource(sb))
+  if (readyStoryboards.length !== storyboards.length) {
+    throw new Error(`Only storyboards with generated video can be merged (${readyStoryboards.length}/${storyboards.length} ready)`)
   }
-  const videos = composedStoryboards
-    .map(sb => sb.composedVideoUrl)
+  const videos = readyStoryboards
+    .map(selectMergeSource)
     .filter(Boolean) as string[]
 
   if (videos.length === 0) throw new Error('No videos to merge')

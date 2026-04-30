@@ -21,6 +21,8 @@ interface GenerateVideoParams {
   referenceImageUrls?: string[]
   duration?: number
   aspectRatio?: string
+  width?: number
+  height?: number
   configId?: number
 }
 
@@ -44,6 +46,8 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     referenceImageUrls: params.referenceImageUrls ? JSON.stringify(params.referenceImageUrls) : null,
     duration: params.duration || 5,
     aspectRatio: params.aspectRatio || '16:9',
+    width: params.width,
+    height: params.height,
     status: 'processing',
     createdAt: ts,
     updatedAt: ts,
@@ -115,6 +119,8 @@ async function processVideoGeneration(id: number, config: AIConfig) {
       referenceImageUrls: resolvedReferenceImageUrls ? JSON.stringify(resolvedReferenceImageUrls) : null,
       duration: record.duration,
       aspectRatio: record.aspectRatio,
+      width: record.width,
+      height: record.height,
     })
     logTaskProgress('VideoTask', 'request', {
       id,
