@@ -9,7 +9,7 @@ export function isComfyUIProvider(provider: string) {
 
 export function getComfyUIBaseUrls(config: AIConfig) {
   return String(config.baseUrl || '')
-    .split(/[\n,]+/)
+    .split(/[\s,]+/)
     .map(item => item.trim())
     .filter(Boolean)
 }

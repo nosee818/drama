@@ -16,6 +16,26 @@ function pickString(...values: any[]) {
   return values.find((value) => typeof value === 'string' && value.trim()) || null
 }
 
+function dataUrlToBlob(value: string): { blob: Blob; filename: string } | null {
+  const match = value.match(/^data:([^;]+);base64,(.+)$/)
+  if (!match) return null
+  const mimeType = match[1]
+  const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg'
+  const bytes = Uint8Array.from(Buffer.from(match[2], 'base64'))
+  return {
+    blob: new Blob([bytes], { type: mimeType }),
+    filename: `input.${ext}`,
+  }
+}
+
+function pickImageForMultipart(record: VideoGenerationRecord, settings: Record<string, any>) {
+  const source = String(settings.imageSource || 'firstFrameUrl')
+  if (source === 'imageUrl') return record.imageUrl
+  if (source === 'lastFrameUrl') return record.lastFrameUrl
+  if (source === 'firstFrameUrl') return record.firstFrameUrl || record.imageUrl
+  return record.firstFrameUrl || record.imageUrl || record.lastFrameUrl
+}
+
 export class GenericVideoAdapter implements VideoProviderAdapter {
   provider = 'custom'
 
@@ -33,6 +53,58 @@ export class GenericVideoAdapter implements VideoProviderAdapter {
       duration: record.duration || undefined,
       aspect_ratio: record.aspectRatio || undefined,
     }
+
+    if (settings.requestType === 'multipart') {
+      const form = new FormData()
+      const promptField = settings.promptField || 'prompt'
+      const imageField = settings.imageField || 'image'
+      const imageValue = pickImageForMultipart(record, settings)
+      const imageBlob = imageValue ? dataUrlToBlob(imageValue) : null
+      const multipartFields: Record<string, string> = {
+        [promptField]: record.prompt || '',
+      }
+
+      form.append(promptField, record.prompt || '')
+      if (imageBlob) {
+        form.append(imageField, imageBlob.blob, settings.imageFilename || imageBlob.filename)
+      } else if (imageValue && settings.allowImageUrlField) {
+        form.append(imageField, imageValue)
+      }
+
+      const formFields = settings.formFields && typeof settings.formFields === 'object' ? settings.formFields : {}
+      const renderedFields = renderTemplateObject(formFields, fallbackBody)
+      for (const [key, value] of Object.entries(renderedFields)) {
+        if (value == null || value === '') continue
+        const renderedValue = String(value)
+        form.append(key, renderedValue)
+        multipartFields[key] = renderedValue
+      }
+
+      const responseType = settings.responseType === 'file' ? 'file' : 'json'
+      return {
+        url: joinProviderUrl(config.baseUrl, '', path),
+        method: settings.method || 'POST',
+        headers: {
+          ...(config.apiKey ? { Authorization: `${settings.authScheme || 'Bearer'} ${config.apiKey}` } : {}),
+          ...(settings.headers && typeof settings.headers === 'object' ? settings.headers : {}),
+        },
+        body: form,
+        responseType,
+        fileExtension: settings.fileExtension || 'mp4',
+        timeoutMs: Number(settings.timeoutMs || settings.timeout_ms || (responseType === 'file' ? 1_800_000 : 600_000)),
+        multipart: imageValue && imageValue.startsWith('data:image/')
+          ? {
+              fields: multipartFields,
+              file: {
+                fieldName: imageField,
+                dataUrl: imageValue,
+                filename: settings.imageFilename || imageBlob?.filename || 'input.jpg',
+              },
+            }
+          : { fields: multipartFields },
+      }
+    }
+
     const body = template && typeof template === 'object'
       ? renderTemplateObject(template, fallbackBody)
       : fallbackBody
@@ -46,6 +118,9 @@ export class GenericVideoAdapter implements VideoProviderAdapter {
         ...(settings.headers && typeof settings.headers === 'object' ? settings.headers : {}),
       },
       body,
+      responseType: settings.responseType === 'file' ? 'file' : 'json',
+      fileExtension: settings.fileExtension || 'mp4',
+      timeoutMs: Number(settings.timeoutMs || settings.timeout_ms || 600_000),
     }
   }
 

@@ -96,6 +96,13 @@ export const characterAPI = {
   voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
   generateImage: (id: number, episodeId?: number | null, configId?: number | null) => api.post(`/characters/${id}/generate-image`, { ...(episodeId ? { episode_id: episodeId } : {}), ...(configId ? { config_id: configId } : {}) }),
   batchImages: (ids: number[], episodeId: number, configId?: number | null) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),
+  images: (id: number) => api.get(`/characters/${id}/images`),
+  useImage: (id: number, imageUrl: string) => api.post(`/characters/${id}/use-image`, { image_url: imageUrl }),
+  uploadImage: (id: number, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return uploadReq('POST', `/characters/${id}/upload-image`, body)
+  },
 }
 
 export const sceneAPI = {
@@ -122,6 +129,12 @@ export const gridAPI = {
 export const videoAPI = {
   generate: (d: any) => api.post('/videos', d),
   get: (id: number) => api.get(`/videos/${id}`),
+  list: (params?: { drama_id?: number; storyboard_id?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.drama_id) query.set('drama_id', String(params.drama_id))
+    if (params?.storyboard_id) query.set('storyboard_id', String(params.storyboard_id))
+    return api.get(`/videos${query.size ? `?${query.toString()}` : ''}`)
+  },
 }
 export const composeAPI = {
   shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),

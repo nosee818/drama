@@ -328,6 +328,24 @@
           <span class="mono">{{ endpointHint }}</span>
         </div>
         <label class="field"><span class="field-label">模型（逗号分隔）</span><input v-model="cfgForm.modelStr" class="input" placeholder="model-name" /></label>
+        <div v-if="cfgForm.service_type === 'video'" class="field video-capability-panel">
+          <div class="field-label">视频参考图能力</div>
+          <div class="capability-grid">
+            <label class="capability-toggle">
+              <input v-model="cfgForm.supportsFirstLast" type="checkbox" />
+              <span>支持首尾帧</span>
+            </label>
+            <label class="capability-toggle">
+              <input v-model="cfgForm.supportsMultipleReferences" type="checkbox" />
+              <span>支持多参考图</span>
+            </label>
+            <label class="field capability-number">
+              <span class="field-label">最多参考图</span>
+              <input v-model.number="cfgForm.maxReferenceImages" class="input" type="number" min="1" max="12" />
+            </label>
+          </div>
+          <span class="field-hint">WAN/LTX 一般保持单图：不勾选、多参考图数量为 1。即梦/Seedance 等支持多图时勾选并填写数量。</span>
+        </div>
         <label class="field">
           <span class="field-label">高级 JSON 配置</span>
           <textarea v-model="cfgForm.settingsStr" class="textarea mono" rows="8" placeholder='ComfyUI 示例：{"workflow": {"3": {"inputs": {"text": "{{prompt}}"}}}}；通用视频可填 {"requestTemplate": {"prompt": "{{prompt}}", "model": "{{model}}"}}' />
@@ -440,7 +458,21 @@ const cfgEditId = ref(null)
 const presetDialog = ref(false)
 const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: 'text', priority: 0 })
+const cfgForm = reactive({
+  name: '',
+  provider: '',
+  api_key: '',
+  base_url: '',
+  endpoint: '',
+  query_endpoint: '',
+  settingsStr: '',
+  modelStr: '',
+  service_type: 'text',
+  priority: 0,
+  supportsFirstLast: false,
+  supportsMultipleReferences: false,
+  maxReferenceImages: 1,
+})
 const huobaoForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
 const providers = ['ali', 'chatfire', 'comfyui', 'custom', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine', 'yunyan']
@@ -520,13 +552,32 @@ function applyProviderPreset(type, provider) {
   cfgForm.settingsStr = preset.settings ? JSON.stringify(preset.settings, null, 2) : ''
   cfgForm.modelStr = preset.models.join(', ')
   cfgForm.name = `${preset.label}-${serviceMeta[type].label}`
+  applyVideoCapabilityForm(readSettingsObject(cfgForm.settingsStr))
 }
 
 function normalizeSettingsInput() {
   const raw = cfgForm.settingsStr.trim()
-  if (!raw) return ''
-  JSON.parse(raw)
-  return raw
+  const settings = raw ? JSON.parse(raw) : {}
+  if (cfgForm.service_type === 'video') {
+    settings.supportsFirstLast = !!cfgForm.supportsFirstLast
+    settings.supportsMultipleReferences = !!cfgForm.supportsMultipleReferences
+    settings.maxReferenceImages = Math.max(1, Number(cfgForm.maxReferenceImages || 1))
+  }
+  return Object.keys(settings).length ? JSON.stringify(settings, null, 2) : ''
+}
+
+function readSettingsObject(value) {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try { return JSON.parse(value) || {} } catch { return {} }
+}
+
+function applyVideoCapabilityForm(settings = {}) {
+  const provider = String(cfgForm.provider || '').toLowerCase()
+  const likelyMultiProvider = ['vidu', 'volcengine', 'minimax', 'seedance', 'jimeng'].includes(provider)
+  cfgForm.supportsFirstLast = !!(settings.supportsFirstLast ?? settings.supports_first_last ?? settings.capabilities?.supportsFirstLast ?? settings.capabilities?.firstLast ?? likelyMultiProvider)
+  cfgForm.supportsMultipleReferences = !!(settings.supportsMultipleReferences ?? settings.supports_multiple_references ?? settings.capabilities?.supportsMultipleReferences ?? settings.capabilities?.multiple ?? likelyMultiProvider)
+  cfgForm.maxReferenceImages = Math.max(1, Number(settings.maxReferenceImages ?? settings.max_reference_images ?? settings.capabilities?.maxReferenceImages ?? settings.capabilities?.max_reference_images ?? (likelyMultiProvider ? 3 : 1)))
 }
 
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
@@ -540,7 +591,7 @@ async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0 })
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0, supportsFirstLast: false, supportsMultipleReferences: false, maxReferenceImages: 1 })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -560,6 +611,7 @@ function startEditCfg(c) {
     service_type: c.service_type,
     priority: c.priority ?? 0,
   })
+  applyVideoCapabilityForm(readSettingsObject(c.settings))
   cfgDialog.value = true
 }
 async function testCfgPayload(payload) {
@@ -1016,6 +1068,39 @@ onBeforeUnmount(() => {
 }
 .settings-title { font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
 .settings-desc { font-size: 13px; color: var(--text-2); margin-top: 4px; }
+.video-capability-panel {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(248,251,255,0.74);
+}
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+.capability-toggle {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.82);
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+.capability-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.capability-number {
+  gap: 5px;
+}
 
 /* AI Config */
 .setup-panel {

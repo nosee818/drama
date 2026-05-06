@@ -247,7 +247,11 @@
       </div>
       <div class="character-grid">
         <article v-for="char in visibleCharacters" :key="char.id" class="character-card">
-          <div :class="['character-avatar', characterAvatarClass(char)]">
+          <button
+            type="button"
+            :class="['character-avatar', characterAvatarClass(char), (char.image_url || char.imageUrl) && 'is-clickable']"
+            @click="openCharacterPreview(char)"
+          >
             <img
               v-if="char.image_url || char.imageUrl"
               :src="assetUrl(char.image_url || char.imageUrl)"
@@ -255,7 +259,7 @@
               @load="rememberImageRatio(char.id, $event)"
             />
             <span v-else>{{ (char.name || '?').slice(0, 1) }}</span>
-          </div>
+          </button>
           <div class="character-copy">
             <div class="character-title-row">
               <div class="character-name">{{ char.name }}</div>
@@ -269,6 +273,8 @@
             </div>
             <div class="character-actions">
               <button class="btn btn-ghost btn-xs" @click="openCharacterEditor(char)">编辑</button>
+              <button class="btn btn-ghost btn-xs" @click="openCharacterHistory(char)">历史</button>
+              <button class="btn btn-ghost btn-xs" @click="openCharacterUpload(char)">上传</button>
               <button class="btn btn-primary btn-xs" :disabled="isPendingCharacterImage(char.id)" @click="regenerateCharacterImage(char)">
                 {{ isPendingCharacterImage(char.id) ? '生成中' : '重新生成' }}
               </button>
@@ -335,6 +341,76 @@
         </div>
       </div>
     </div>
+
+    <div v-if="characterPreviewDialog" class="dialog-mask">
+      <div class="card dialog image-preview-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Character Image</div>
+            <div class="dialog-title-row">
+              <div class="dialog-title">{{ previewCharacter?.name || '角色形象' }}</div>
+              <span class="dialog-badge">当前参考图</span>
+            </div>
+          </div>
+          <button class="back-btn" @click="closeCharacterPreview">关闭</button>
+        </div>
+        <div class="preview-stage">
+          <img :src="assetUrl(characterImage(previewCharacter))" :alt="previewCharacter?.name || '角色形象'" />
+        </div>
+      </div>
+    </div>
+
+    <div v-if="characterHistoryDialog" class="dialog-mask">
+      <div class="card dialog character-history-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Character History</div>
+            <div class="dialog-title-row">
+              <div class="dialog-title">{{ historyCharacter?.name || '历史形象' }}</div>
+              <span class="dialog-badge">{{ characterHistoryItems.length }} 张</span>
+            </div>
+            <div class="dialog-sub">选择历史生成或上传过的人物图，确认后会设为当前角色参考图。</div>
+          </div>
+          <button class="back-btn" @click="closeCharacterHistory">关闭</button>
+        </div>
+        <div class="history-layout">
+          <button type="button" class="history-nav-btn" :disabled="!characterHistoryItems.length" @click="stepCharacterHistory(-1)">‹</button>
+          <div class="history-stage">
+            <img v-if="selectedHistoryItem" :src="assetUrl(selectedHistoryItem.url)" :alt="historyCharacter?.name || '历史图'" />
+            <div v-else class="history-empty">暂无历史图片</div>
+          </div>
+          <button type="button" class="history-nav-btn" :disabled="!characterHistoryItems.length" @click="stepCharacterHistory(1)">›</button>
+        </div>
+        <div v-if="selectedHistoryItem" class="history-meta">
+          <span>{{ historyIndex + 1 }}/{{ characterHistoryItems.length }}</span>
+          <span v-if="selectedHistoryItem.is_current">当前使用</span>
+          <span v-if="selectedHistoryItem.provider">{{ selectedHistoryItem.provider }}</span>
+          <span>{{ formatDate(selectedHistoryItem.completed_at || selectedHistoryItem.created_at) }}</span>
+        </div>
+        <div class="history-strip">
+          <button
+            v-for="(item, index) in characterHistoryItems"
+            :key="`${item.id}-${item.url}`"
+            type="button"
+            :class="['history-thumb', index === historyIndex && 'is-selected', item.is_current && 'is-current']"
+            @click="historyIndex = index"
+          >
+            <img :src="assetUrl(item.url)" :alt="`历史图 ${index + 1}`" />
+          </button>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy">确认后只切换角色库当前参考图，不会删除历史图片。</div>
+          <div class="dialog-actions">
+            <button class="btn btn-ghost" @click="closeCharacterHistory">取消</button>
+            <button class="btn btn-primary" :disabled="!selectedHistoryItem || selectingHistoryImage" @click="useSelectedCharacterImage">
+              {{ selectingHistoryImage ? '确认中...' : '确认使用' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <input ref="characterUploadInput" type="file" accept="image/*" class="hidden-file-input" @change="handleCharacterUpload" />
 
     <!-- Episode List -->
     <div class="section-label">
@@ -480,6 +556,16 @@ const editingCharacter = ref(null)
 const savingCharacter = ref(false)
 const pendingCharacterImageIds = ref([])
 const imageRatios = ref({})
+const characterPreviewDialog = ref(false)
+const previewCharacter = ref(null)
+const characterHistoryDialog = ref(false)
+const historyCharacter = ref(null)
+const characterHistoryItems = ref([])
+const historyIndex = ref(0)
+const loadingCharacterHistory = ref(false)
+const selectingHistoryImage = ref(false)
+const characterUploadInput = ref(null)
+const uploadCharacter = ref(null)
 const characterForm = ref({
   name: '',
   role: '',
@@ -594,6 +680,7 @@ const producedCharacters = computed(() => characterLibrary.value.filter(c => c.i
 const visibleCharacters = computed(() => showAllCharacters.value ? characterLibrary.value : characterLibrary.value.slice(0, 8))
 const projectOrientation = computed(() => normalizeOrientation(parseMetadata(drama.value?.metadata).orientation || parseMetadata(drama.value?.metadata).aspect_ratio))
 const projectOrientationLabel = computed(() => projectOrientation.value === 'landscape' ? '横屏 16:9' : '竖屏 9:16')
+const selectedHistoryItem = computed(() => characterHistoryItems.value[historyIndex.value] || null)
 
 function assetUrl(value) {
   if (!value) return ''
@@ -638,6 +725,100 @@ function characterAvatarClass(char) {
 
 function characterImage(char) {
   return char?.image_url || char?.imageUrl || ''
+}
+
+function openCharacterPreview(char) {
+  if (!characterImage(char)) return
+  previewCharacter.value = char
+  characterPreviewDialog.value = true
+}
+
+function closeCharacterPreview() {
+  characterPreviewDialog.value = false
+  previewCharacter.value = null
+}
+
+async function openCharacterHistory(char) {
+  historyCharacter.value = char
+  characterHistoryDialog.value = true
+  characterHistoryItems.value = []
+  historyIndex.value = 0
+  try {
+    loadingCharacterHistory.value = true
+    const items = await characterAPI.images(char.id)
+    characterHistoryItems.value = items || []
+    const currentIndex = characterHistoryItems.value.findIndex(item => item.is_current)
+    historyIndex.value = currentIndex >= 0 ? currentIndex : 0
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    loadingCharacterHistory.value = false
+  }
+}
+
+function closeCharacterHistory() {
+  if (selectingHistoryImage.value) return
+  characterHistoryDialog.value = false
+  historyCharacter.value = null
+  characterHistoryItems.value = []
+  historyIndex.value = 0
+}
+
+function stepCharacterHistory(delta) {
+  const total = characterHistoryItems.value.length
+  if (!total) return
+  historyIndex.value = (historyIndex.value + delta + total) % total
+}
+
+async function useSelectedCharacterImage() {
+  if (!historyCharacter.value || !selectedHistoryItem.value) return
+  try {
+    selectingHistoryImage.value = true
+    await characterAPI.useImage(historyCharacter.value.id, selectedHistoryItem.value.url)
+    toast.success('已切换角色参考图')
+    closeCharacterHistory()
+    await load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    selectingHistoryImage.value = false
+  }
+}
+
+function openCharacterUpload(char) {
+  uploadCharacter.value = char
+  characterUploadInput.value?.click()
+}
+
+async function handleCharacterUpload(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !uploadCharacter.value) return
+  try {
+    await characterAPI.uploadImage(uploadCharacter.value.id, file)
+    toast.success('角色参考图已上传')
+    await load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    uploadCharacter.value = null
+  }
+}
+
+function formatDate(value) {
+  if (!value) return ''
+  try {
+    return new Date(value).toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return ''
+  }
 }
 
 function isPendingCharacterImage(id) {
@@ -982,6 +1163,8 @@ async function addEpisode() {
 function handleAddDialogKeydown(event) {
   if (event.key === 'Escape' && addDialog.value) addDialog.value = false
   if (event.key === 'Escape' && characterDialog.value) closeCharacterEditor()
+  if (event.key === 'Escape' && characterPreviewDialog.value) closeCharacterPreview()
+  if (event.key === 'Escape' && characterHistoryDialog.value) closeCharacterHistory()
   if (event.key === 'Escape' && autoConfirmDialog.value) autoConfirmDialog.value = false
   if (event.key === 'Escape' && taskLogDialog.value) taskLogDialog.value = false
 }
@@ -1330,6 +1513,8 @@ onBeforeUnmount(() => {
   height: 58px;
   overflow: hidden;
   border-radius: 12px;
+  border: 0;
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1337,6 +1522,15 @@ onBeforeUnmount(() => {
   color: var(--accent);
   font-size: 20px;
   font-weight: 800;
+}
+.character-avatar.is-clickable {
+  cursor: zoom-in;
+  box-shadow: inset 0 0 0 1px rgba(27, 41, 64, 0.06);
+  transition: transform 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out);
+}
+.character-avatar.is-clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 0 0 1px rgba(76,125,255,0.28), 0 8px 20px rgba(32, 48, 77, 0.12);
 }
 .character-avatar.is-tall {
   width: 58px;
@@ -1693,6 +1887,113 @@ onBeforeUnmount(() => {
 }
 .character-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.image-preview-dialog,
+.character-history-dialog {
+  width: min(900px, 100%);
+}
+.preview-stage,
+.history-stage {
+  min-height: 360px;
+  max-height: min(660px, calc(100dvh - 300px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  background:
+    linear-gradient(45deg, rgba(226,234,247,0.48) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(226,234,247,0.48) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(226,234,247,0.48) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(226,234,247,0.48) 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+}
+.preview-stage img,
+.history-stage img {
+  width: 100%;
+  height: 100%;
+  max-height: inherit;
+  object-fit: contain;
+  display: block;
+}
+.history-layout {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 10px;
+}
+.history-nav-btn {
+  width: 42px;
+  height: 60px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.82);
+  color: var(--text-2);
+  font-size: 30px;
+  line-height: 1;
+  cursor: pointer;
+}
+.history-nav-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.history-empty {
+  color: var(--text-3);
+  font-weight: 700;
+}
+.history-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.history-meta span {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.76);
+  border: 1px solid rgba(27, 41, 64, 0.08);
+}
+.history-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 6px;
+}
+.history-thumb {
+  width: 74px;
+  height: 74px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 0;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.history-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.history-thumb.is-selected {
+  border-color: var(--accent);
+}
+.history-thumb.is-current {
+  box-shadow: inset 0 0 0 3px rgba(81, 143, 102, 0.36);
+}
+.hidden-file-input {
+  position: fixed;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
 }
 
 @keyframes pulseDot {

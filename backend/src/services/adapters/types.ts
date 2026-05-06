@@ -10,7 +10,7 @@ export interface ImageProviderAdapter {
    * @param config AI 配置 { baseUrl, apiKey, model }
    * @param record 图片生成记录
    */
-  buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest
+  buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest | Promise<ProviderRequest>
 
   /**
    * 解析生成响应，判断是同步还是异步
@@ -66,6 +66,17 @@ export interface ProviderRequest {
   method: string
   headers: Record<string, string>
   body: any
+  responseType?: 'json' | 'file'
+  fileExtension?: string
+  timeoutMs?: number
+  multipart?: {
+    fields: Record<string, string>
+    file?: {
+      fieldName: string
+      dataUrl: string
+      filename: string
+    }
+  }
 }
 
 export interface AIConfig {

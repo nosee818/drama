@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { generateVoiceSample } from '../services/tts-generation.js'
 import { generateImage } from '../services/image-generation.js'
+import { saveUploadedFile } from '../utils/storage.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { dramaOrientation, orientationImageSize } from '../utils/aspect.js'
 
@@ -43,22 +44,19 @@ function cleanStableCharacterText(value?: string | null) {
 
 function buildCharacterReferencePrompt(char: any) {
   const stableAppearance = cleanStableCharacterText(char.appearance)
-  const stableDescription = cleanStableCharacterText(char.description)
-  const stablePersonality = cleanStableCharacterText(char.personality)
   const base = [
-    `角色姓名：${char.name}`,
-    char.role ? `角色定位：${char.role}` : '',
-    stableAppearance ? `稳定外貌设定：${stableAppearance}` : '',
-    stableDescription ? `人物基础设定：${stableDescription}` : '',
-    stablePersonality ? `气质性格：${stablePersonality}` : '',
+    `单人角色参考照：${char.name}`,
+    stableAppearance ? `外貌设定：${stableAppearance}` : '',
   ].filter(Boolean).join('，')
   return [
     base || `${char.name}，人物角色参考图`,
-    '生成可跨集复用的角色设定参考图',
-    '单人，清晰正面或三分之二侧身，五官清楚，表情自然中性，站姿稳定',
+    '全身照片，完整从头到脚入镜，人物站立，居中构图',
+    '单人，清晰正面或三分之二侧身，五官清楚，表情自然中性，站姿稳定，双手自然',
     '完整展示发型、发色、年龄感、身高体态、服装、国籍/地域气质、标志性配饰',
-    '干净背景或浅色摄影棚背景，不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊，不要多人，不要文字水印',
-    '高质量，电影感人物设定照',
+    '干净浅色摄影棚背景，人物设定照，真实摄影质感',
+    '不要生成设定卡，不要任何文字，不要标签，不要水印，不要海报排版，不要多人',
+    '不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊',
+    '高质量全身人物定妆照',
   ].join('，')
 }
 
@@ -77,6 +75,87 @@ app.put('/:id', async (c) => {
   }
   db.update(schema.characters).set(updates).where(eq(schema.characters.id, id)).run()
   return success(c)
+})
+
+// GET /characters/:id/images — 历史角色图
+app.get('/:id/images', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+  const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.characterId, id)).all()
+  const currentUrl = char.imageUrl || char.localPath || ''
+  const items = rows
+    .filter(row => row.status === 'completed' && (row.localPath || row.imageUrl))
+    .sort((a, b) => String(b.completedAt || b.updatedAt || b.createdAt).localeCompare(String(a.completedAt || a.updatedAt || a.createdAt)))
+    .map(row => ({
+      id: row.id,
+      url: row.localPath || row.imageUrl,
+      prompt: row.prompt,
+      provider: row.provider,
+      model: row.model,
+      created_at: row.createdAt,
+      completed_at: row.completedAt,
+      is_current: (row.localPath || row.imageUrl) === currentUrl,
+    }))
+  if (currentUrl && !items.some(item => item.url === currentUrl)) {
+    items.unshift({
+      id: 0,
+      url: currentUrl,
+      prompt: '',
+      provider: 'manual',
+      model: '',
+      created_at: char.updatedAt,
+      completed_at: char.updatedAt,
+      is_current: true,
+    })
+  }
+  return success(c, items)
+})
+
+// POST /characters/:id/use-image — 从历史图设为当前角色图
+app.post('/:id/use-image', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
+  const imageUrl = String(body.image_url || body.url || '').trim()
+  if (!imageUrl) return badRequest(c, 'image_url is required')
+  const updates: Record<string, any> = { imageUrl, updatedAt: now() }
+  if (imageUrl.startsWith('static/')) updates.localPath = imageUrl
+  db.update(schema.characters)
+    .set(updates)
+    .where(eq(schema.characters.id, id))
+    .run()
+  return success(c, { image_url: imageUrl })
+})
+
+// POST /characters/:id/upload-image — 上传并设为当前角色图
+app.post('/:id/upload-image', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+  const body = await c.req.parseBody()
+  const file = body['file']
+  if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+
+  const buffer = await file.arrayBuffer()
+  const localPath = await saveUploadedFile(buffer, 'images', file.name)
+  const ts = now()
+  db.insert(schema.imageGenerations).values({
+    dramaId: char.dramaId,
+    characterId: id,
+    imageType: 'character',
+    provider: 'manual',
+    prompt: '用户上传角色参考图',
+    localPath,
+    status: 'completed',
+    createdAt: ts,
+    updatedAt: ts,
+    completedAt: ts,
+  }).run()
+  db.update(schema.characters)
+    .set({ imageUrl: localPath, localPath, updatedAt: ts })
+    .where(eq(schema.characters.id, id))
+    .run()
+  return success(c, { image_url: localPath })
 })
 
 // DELETE /characters/:id

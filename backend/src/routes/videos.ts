@@ -22,6 +22,45 @@ function getDramaForVideoRequest(body: any) {
   return null
 }
 
+function safeSettings(config: any) {
+  const settings = config?.settings
+  if (!settings) return {}
+  if (typeof settings === 'object') return settings
+  try { return JSON.parse(settings) || {} } catch { return {} }
+}
+
+function videoReferenceCapabilities(config: any) {
+  const settings = safeSettings(config)
+  const provider = String(config?.provider || '').toLowerCase()
+  const capabilities = settings.referenceCapabilities || settings.capabilities || {}
+  const maxReferenceImages = Number(
+    settings.maxReferenceImages
+    ?? settings.max_reference_images
+    ?? capabilities.maxReferenceImages
+    ?? capabilities.max_reference_images
+    ?? 1,
+  )
+  const supportsFirstLast = Boolean(
+    settings.supportsFirstLast
+    ?? settings.supports_first_last
+    ?? capabilities.firstLast
+    ?? capabilities.supportsFirstLast
+    ?? ['vidu', 'volcengine', 'minimax', 'seedance', 'jimeng'].includes(provider),
+  )
+  const supportsMultiple = Boolean(
+    settings.supportsMultipleReferences
+    ?? settings.supports_multiple_references
+    ?? capabilities.multiple
+    ?? capabilities.supportsMultipleReferences
+    ?? maxReferenceImages > 1,
+  )
+  return {
+    maxReferenceImages: Math.max(1, maxReferenceImages || 1),
+    supportsFirstLast,
+    supportsMultiple,
+  }
+}
+
 // POST /videos — Generate video
 app.post('/', async (c) => {
   const body = await c.req.json()
@@ -29,12 +68,44 @@ app.post('/', async (c) => {
 
   try {
     let configId: number | undefined = body.config_id
+    let config: any = null
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (ep?.videoConfigId != null) configId = ep.videoConfigId
       }
+    }
+    if (configId) {
+      ;[config] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, Number(configId))).all()
+    }
+    if (!config) {
+      ;[config] = db.select().from(schema.aiServiceConfigs).all()
+        .filter((item: any) => item.serviceType === 'video' && item.isActive !== false)
+        .sort((a: any, b: any) => {
+          if (!!a.isDefault !== !!b.isDefault) return a.isDefault ? -1 : 1
+          return (Number(b.priority) || 0) - (Number(a.priority) || 0)
+        })
+    }
+    const caps = videoReferenceCapabilities(config)
+    let referenceMode = body.reference_mode
+    let imageUrl = body.image_url
+    let firstFrameUrl = body.first_frame_url
+    let lastFrameUrl = body.last_frame_url
+    let referenceImageUrls = Array.isArray(body.reference_image_urls) ? body.reference_image_urls.filter(Boolean) : undefined
+    if (referenceMode === 'first_last' && !caps.supportsFirstLast) {
+      referenceMode = firstFrameUrl || imageUrl ? 'single' : (referenceImageUrls?.length ? 'single' : 'none')
+      imageUrl = firstFrameUrl || imageUrl || referenceImageUrls?.[0]
+      firstFrameUrl = undefined
+      lastFrameUrl = undefined
+      referenceImageUrls = undefined
+    }
+    if (referenceMode === 'multiple' && !caps.supportsMultiple) {
+      referenceMode = referenceImageUrls?.[0] ? 'single' : 'none'
+      imageUrl = referenceImageUrls?.[0] || imageUrl
+      referenceImageUrls = undefined
+    } else if (referenceMode === 'multiple' && referenceImageUrls?.length) {
+      referenceImageUrls = referenceImageUrls.slice(0, caps.maxReferenceImages)
     }
 
     logTaskStart('VideoAPI', 'generate', {
@@ -52,11 +123,11 @@ app.post('/', async (c) => {
       dramaId: body.drama_id,
       prompt: body.prompt,
       model: body.model,
-      referenceMode: body.reference_mode,
-      imageUrl: body.image_url,
-      firstFrameUrl: body.first_frame_url,
-      lastFrameUrl: body.last_frame_url,
-      referenceImageUrls: body.reference_image_urls,
+      referenceMode,
+      imageUrl,
+      firstFrameUrl,
+      lastFrameUrl,
+      referenceImageUrls,
       duration: body.duration,
       aspectRatio: body.aspect_ratio || orientationAspectRatio(orientation),
       width: Number(body.width || size.width),

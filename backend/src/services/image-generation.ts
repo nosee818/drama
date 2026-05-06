@@ -89,7 +89,7 @@ async function processImageGeneration(id: number, config: AIConfig) {
 
     // 使用 Adapter 构建请求
     const resolvedReferenceImages = await normalizeReferenceImages(record.referenceImages)
-    const { url, method, headers, body } = adapter.buildGenerateRequest(requestConfig, {
+    const { url, method, headers, body } = await adapter.buildGenerateRequest(requestConfig, {
       id: record.id,
       model: record.model,
       prompt: record.prompt,

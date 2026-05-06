@@ -31,7 +31,7 @@ function renderWorkflow(workflow: any, values: Record<string, any>): any {
   }
   if (typeof workflow !== 'string') return workflow
   const exactMatch = workflow.match(/^\{\{(\w+)\}\}$/)
-  if (exactMatch) return values[exactMatch[1]] == null ? '' : values[exactMatch[1]]
+  if (exactMatch) return Object.prototype.hasOwnProperty.call(values, exactMatch[1]) ? values[exactMatch[1]] : ''
   return workflow.replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] == null ? '' : String(values[key]))
 }
 
@@ -109,8 +109,16 @@ class ComfyUIBase {
 }
 
 export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAdapter {
-  buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest {
+  async buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): Promise<ProviderRequest> {
     const { width, height } = parseSize(record.size)
+    const referenceImages = (await Promise.all(
+      parseReferenceImages(record.referenceImages).slice(0, 3).map((item) => uploadComfyUIImageIfNeeded(config, item)),
+    )).filter((item): item is string => !!item)
+    const settings = config.settings || {}
+    const linkIds = settings.referenceImageLinks || settings.imageLinks || {}
+    const refLink = (name: string, index: number) => referenceImages[index]
+      ? (linkIds[name] ?? linkIds[String(index + 1)] ?? null)
+      : null
     return this.buildPromptRequest(config, {
       prompt: record.prompt || '',
       negative_prompt: '',
@@ -118,7 +126,18 @@ export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAda
       width,
       height,
       seed: Math.floor(Math.random() * 2147483647),
-      input_image: record.referenceImages ? JSON.parse(record.referenceImages)[0] || '' : '',
+      input_image: referenceImages[0] || '',
+      input_images: referenceImages,
+      image1: referenceImages[0] || '',
+      image2: referenceImages[1] || '',
+      image3: referenceImages[2] || '',
+      image1_link: refLink('image1', 0),
+      image2_link: refLink('image2', 1),
+      image3_link: refLink('image3', 2),
+      reference_count: referenceImages.length,
+      has_image1: !!referenceImages[0],
+      has_image2: !!referenceImages[1],
+      has_image3: !!referenceImages[2],
     })
   }
 
@@ -143,6 +162,46 @@ export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAda
   extractImageBase64(): { data: string; mimeType: string } | null {
     return null
   }
+}
+
+function parseReferenceImages(raw?: string | null): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item) => String(item || '').trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function uploadComfyUIImageIfNeeded(config: AIConfig, value: string | null): Promise<string | null> {
+  if (!value) return null
+  if (!value.startsWith('data:image/')) return value
+
+  const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+  if (!match) return value
+
+  const mimeType = match[1]
+  const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg'
+  const bytes = Uint8Array.from(Buffer.from(match[2], 'base64'))
+  const blob = new Blob([bytes], { type: mimeType })
+  const filename = `veryai-${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`
+  const form = new FormData()
+  form.append('image', blob, filename)
+  form.append('overwrite', 'true')
+  form.append('type', 'input')
+
+  const resp = await fetch(joinProviderUrl(config.baseUrl, '', '/upload/image'), {
+    method: 'POST',
+    headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
+    body: form,
+    signal: AbortSignal.timeout(120_000),
+  })
+
+  if (!resp.ok) throw new Error(`ComfyUI image upload failed ${resp.status}: ${await resp.text()}`)
+  const result = await resp.json() as any
+  return result.name || result.filename || filename
 }
 
 export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAdapter {

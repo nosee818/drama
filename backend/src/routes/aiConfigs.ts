@@ -60,9 +60,23 @@ function normalizeSettings(value: any) {
   return JSON.stringify(value)
 }
 
+function parseSettingsObject(value: any): Record<string, any> {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  if (typeof value !== 'string') return {}
+  const trimmed = value.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed = JSON.parse(trimmed)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function splitBaseUrls(baseUrl: string) {
   return String(baseUrl || '')
-    .split(/[\n,]+/)
+    .split(/[\s,]+/)
     .map(item => item.trim())
     .filter(Boolean)
 }
@@ -88,7 +102,30 @@ function buildTextProbePath(endpoint?: string) {
   return clean
 }
 
-function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string, endpoint?: string) {
+function buildMultipartVideoProbe(baseUrl: string, endpoint: string | undefined, apiKey: string | undefined, settings: Record<string, any>) {
+  const form = new FormData()
+  const promptField = settings.promptField || 'prompt'
+  const imageField = settings.imageField || 'image'
+  const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+  const bytes = Uint8Array.from(Buffer.from(samplePng, 'base64'))
+  form.append(promptField, settings.testPrompt || 'Moving clouds')
+  form.append(imageField, new Blob([bytes], { type: 'image/png' }), settings.imageFilename || 'test.png')
+
+  const formFields = settings.formFields && typeof settings.formFields === 'object' ? settings.formFields : {}
+  for (const [key, value] of Object.entries(formFields)) {
+    if (value == null || value === '') continue
+    form.append(key, String(value).replace(/\{\{prompt\}\}/g, settings.testPrompt || 'Moving clouds'))
+  }
+
+  return {
+    method: settings.method || 'POST',
+    url: joinProviderUrl(baseUrl, '', endpoint || settings.endpoint || settings.generatePath || '/'),
+    headers: bearerHeaders(apiKey),
+    body: form,
+  }
+}
+
+function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string, endpoint?: string, settings: Record<string, any> = {}) {
   const p = provider.toLowerCase()
   const m = model || ''
 
@@ -160,6 +197,10 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
       headers: bearerHeaders(apiKey),
       body: undefined,
     }
+  }
+
+  if (serviceType === 'video' && settings.requestType === 'multipart') {
+    return buildMultipartVideoProbe(baseUrl, endpoint, apiKey, settings)
   }
 
   return {
@@ -309,8 +350,9 @@ app.post('/test', async (c) => {
   }
 
   const model = Array.isArray(body.model) ? body.model[0] : body.model
+  const settings = parseSettingsObject(body.settings)
   const baseUrls = splitBaseUrls(body.base_url)
-  const probes = baseUrls.map((baseUrl) => buildProbe(body.service_type, body.provider, baseUrl, model, body.api_key, body.endpoint))
+  const probes = baseUrls.map((baseUrl) => buildProbe(body.service_type, body.provider, baseUrl, model, body.api_key, body.endpoint, settings))
   const probe = probes[0]
   const probeUrl = redactUrl(probe.url)
 
@@ -325,14 +367,22 @@ app.post('/test', async (c) => {
     const results = []
     for (const item of probes) {
       try {
+        const isFormData = typeof FormData !== 'undefined' && item.body instanceof FormData
+        const requestBody: BodyInit | undefined = item.body == null
+          ? undefined
+          : isFormData
+            ? item.body as BodyInit
+            : JSON.stringify(item.body)
         const resp = await fetch(item.url, {
           method: item.method,
           headers: item.headers,
-          body: item.body ? JSON.stringify(item.body) : undefined,
-          signal: AbortSignal.timeout(8000),
+          body: requestBody,
+          signal: AbortSignal.timeout(settings.requestType === 'multipart' ? 30000 : 8000),
         })
         const text = await resp.text()
-        const reachable = [200, 204, 400, 401, 403].includes(resp.status)
+        const reachable = settings.requestType === 'multipart'
+          ? ![404, 405].includes(resp.status)
+          : [200, 201, 202, 204, 400, 401, 403, 422].includes(resp.status)
         results.push({
           ok: resp.ok,
           reachable,

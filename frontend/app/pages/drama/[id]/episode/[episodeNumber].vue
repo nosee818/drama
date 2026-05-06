@@ -1640,6 +1640,7 @@ const pendingVideoIds = ref([])
 const pendingComposeIds = ref([])
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
+const activeVideoPolls = new Set()
 const imageViewer = ref({ open: false, src: '', title: '' })
 const selectedStoryboardTextConfigId = ref(null)
 const storyboardTextConfigStorageKey = computed(() => `huobao:storyboard-text-config:${dramaId}:${episodeNumber}`)
@@ -1808,6 +1809,46 @@ const sceneImageConfigLabel = computed(() => configLabel(activeSceneImageConfig.
 const shotImageConfigLabel = computed(() => configLabel(activeShotImageConfig.value))
 const lockedVideoConfigLabel = computed(() => configLabel(activeVideoConfig.value))
 const lockedAudioConfigLabel = computed(() => configLabel(activeAudioConfig.value))
+
+function configSettings(config) {
+  const settings = config?.settings
+  if (!settings) return {}
+  if (typeof settings === 'object') return settings
+  try { return JSON.parse(settings) || {} } catch { return {} }
+}
+
+function videoReferenceCapabilities(config) {
+  const settings = configSettings(config)
+  const provider = String(config?.provider || '').toLowerCase()
+  const capabilities = settings.referenceCapabilities || settings.capabilities || {}
+  const maxReferenceImages = Number(
+    settings.maxReferenceImages
+    ?? settings.max_reference_images
+    ?? capabilities.maxReferenceImages
+    ?? capabilities.max_reference_images
+    ?? 1,
+  )
+  const supportsFirstLast = Boolean(
+    settings.supportsFirstLast
+    ?? settings.supports_first_last
+    ?? capabilities.firstLast
+    ?? capabilities.supportsFirstLast
+    ?? ['vidu', 'volcengine', 'minimax', 'seedance', 'jimeng'].includes(provider),
+  )
+  const supportsMultiple = Boolean(
+    settings.supportsMultipleReferences
+    ?? settings.supports_multiple_references
+    ?? capabilities.multiple
+    ?? capabilities.supportsMultipleReferences
+    ?? maxReferenceImages > 1
+    ?? ['vidu', 'volcengine', 'minimax', 'seedance', 'jimeng'].includes(provider),
+  )
+  return {
+    maxReferenceImages: Math.max(1, maxReferenceImages || 1),
+    supportsFirstLast,
+    supportsMultiple,
+  }
+}
 
 // Grid tool state
 const gridDialog = ref(false)
@@ -2705,6 +2746,7 @@ async function refresh() {
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
       await loadLatestGridImage()
+      await restoreVideoGenerationState()
     }
   } catch (e) {
     toast.error(e.message)
@@ -3049,6 +3091,7 @@ async function genShotFrame(sb, frameType) {
 }
 
 async function genVid(sb) {
+  const capabilities = videoReferenceCapabilities(activeVideoConfig.value)
   const params = {
     storyboard_id: sb.id,
     drama_id: dramaId,
@@ -3058,9 +3101,10 @@ async function genVid(sb) {
   const first = getFirstFrame(sb)
   const last = getLastFrame(sb)
   const refs = getRefs(sb)
-  if (first && last) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
-  else if (refs.length) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: [first, ...refs].filter(Boolean) }) }
+  if (first && last && capabilities.supportsFirstLast) { Object.assign(params, { reference_mode: 'first_last', first_frame_url: first, last_frame_url: last }) }
   else if (first) { Object.assign(params, { reference_mode: 'single', image_url: first }) }
+  else if (refs.length && capabilities.supportsMultiple) { Object.assign(params, { reference_mode: 'multiple', reference_image_urls: refs.slice(0, capabilities.maxReferenceImages) }) }
+  else if (refs.length) { Object.assign(params, { reference_mode: 'single', image_url: refs[0] }) }
   try {
     delete failedVideoMessages.value[sb.id]
     if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
@@ -3074,6 +3118,11 @@ async function genVid(sb) {
   }
 }
 async function pollVideoGeneration(generationId, storyboardId) {
+  const pollKey = `${generationId || 'storyboard'}:${storyboardId}`
+  if (activeVideoPolls.has(pollKey)) return
+  activeVideoPolls.add(pollKey)
+  const stopPolling = () => activeVideoPolls.delete(pollKey)
+
   if (!generationId) {
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === storyboardId)
@@ -3081,10 +3130,11 @@ async function pollVideoGeneration(generationId, storyboardId) {
       if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
       return done
     }, 60, 4000)
+    stopPolling()
     return
   }
-  for (let i = 0; i < 120; i++) {
-    await sleep(4000)
+  for (let i = 0; i < 90; i++) {
+    await sleep(20000)
     try {
       const res = await videoAPI.get(generationId)
       await refresh()
@@ -3092,6 +3142,7 @@ async function pollVideoGeneration(generationId, storyboardId) {
         pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         delete failedVideoMessages.value[storyboardId]
         toast.success('视频生成完成')
+        stopPolling()
         return
       }
       if (res?.status === 'failed') {
@@ -3101,6 +3152,7 @@ async function pollVideoGeneration(generationId, storyboardId) {
           [storyboardId]: res?.error_msg || res?.errorMsg || '视频生成失败',
         }
         toast.error(failedVideoMessages.value[storyboardId])
+        stopPolling()
         return
       }
     } catch {}
@@ -3111,7 +3163,37 @@ async function pollVideoGeneration(generationId, storyboardId) {
     [storyboardId]: '视频生成超时',
   }
   toast.error('视频生成超时')
+  stopPolling()
 }
+
+async function restoreVideoGenerationState() {
+  const targets = sbs.value
+  if (!targets.length) return
+  const pending = new Set()
+  const failed = { ...failedVideoMessages.value }
+  await Promise.all(targets.map(async (sb) => {
+    try {
+      const rows = await videoAPI.list({ storyboard_id: sb.id })
+      const latest = Array.isArray(rows)
+        ? [...rows].sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0]
+        : null
+      if (!latest) return
+      if (latest.status === 'processing' || latest.status === 'pending') {
+        pending.add(sb.id)
+        delete failed[sb.id]
+        pollVideoGeneration(latest.id, sb.id)
+      } else if (latest.status === 'failed') {
+        if (pendingVideoIds.value.includes(sb.id)) pending.delete(sb.id)
+        failed[sb.id] = latest.error_msg || latest.errorMsg || '视频生成失败'
+      } else if (latest.status === 'completed') {
+        delete failed[sb.id]
+      }
+    } catch {}
+  }))
+  pendingVideoIds.value = [...new Set([...pendingVideoIds.value.filter(id => pending.has(id)), ...pending])]
+  failedVideoMessages.value = failed
+}
+
 async function doCompose(sb) {
   if (!hasTTS(sb)) {
     toast.info('该镜头没有配音，已跳过视频配音合成')
