@@ -17,6 +17,14 @@ function sceneImageConfigId(drama: any, fallback?: number | null) {
   return Number(defaults.scene_image_config_id || defaults.image_config_id || fallback || 0) || undefined
 }
 
+function emptyScenePrompt(prompt: string) {
+  const base = String(prompt || '').trim()
+  const guard = '空场景，纯环境背景，没有任何人物、脸、身体、手、剪影、人群或角色，重点表现空间结构、陈设、光线和氛围，不要文字、签名或水印'
+  if (!base) return guard
+  if (/空场景|无人|无人物|不要出现人物|没有任何人物/.test(base)) return base
+  return `${base}，${guard}`
+}
+
 // POST /scenes
 app.post('/', async (c) => {
   const body = await c.req.json()
@@ -57,7 +65,7 @@ app.post('/:id/generate-image', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
 
-  const prompt = scene.prompt || `${scene.location}, ${scene.time || ''}, 高质量场景, 电影感`
+  const prompt = emptyScenePrompt(scene.prompt || `${scene.location}, ${scene.time || ''}, 高质量场景, 电影感`)
   try {
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep.id, dramaId: scene.dramaId, location: scene.location })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()

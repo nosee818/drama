@@ -6,6 +6,8 @@
 import { Agent } from '@mastra/core/agent'
 import { createOpenAI } from '@ai-sdk/openai'
 import { eq, isNull, and } from 'drizzle-orm'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { db, schema } from '../db/index.js'
 import { getConfigById, getTextConfig, getTextProviderBaseUrl } from '../services/ai.js'
 import { logTaskProgress } from '../utils/task-logger.js'
@@ -145,7 +147,8 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 工作流程：
 1. 调用 read_scenes 读取所有场景信息
 2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成中文提示词
-3. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[电影感场景]，[高质量]，[无文字水印]
+3. 场景图必须是空场景，只表现环境，不允许出现任何人物、脸、身体、手、剪影、人群或角色
+4. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[空场景/纯环境背景/无人物]，[电影感场景]，[高质量]，[无文字水印]
 
 ## 宫格图提示词（参考 skills/grid-image-generator/SKILL.md）
 
@@ -167,11 +170,106 @@ const DEFAULT_PROMPTS: Record<string, { name: string; instructions: string }> = 
 - 必须包含“统一美术风格”保持风格统一
 - 必须包含“电影级画质”
 - 避免出现文字或水印
-- 角色图片强调外貌和气质，场景图片强调氛围和光线，宫格图片强调整体布局一致性`,
+- 角色图片强调外貌和气质，场景图片强调空场景、空间结构、陈设、氛围和光线，宫格图片强调整体布局一致性`,
   },
 }
 
 export const validAgentTypes = Object.keys(DEFAULT_PROMPTS)
+
+const DEFAULT_TEXT_MODEL_TIMEOUT_MS = 20 * 60 * 1000
+const MIN_TEXT_MODEL_TIMEOUT_MS = 30 * 1000
+const MAX_TEXT_MODEL_TIMEOUT_MS = 60 * 60 * 1000
+
+function clampTimeoutMs(value: number) {
+  if (!Number.isFinite(value)) return DEFAULT_TEXT_MODEL_TIMEOUT_MS
+  return Math.max(MIN_TEXT_MODEL_TIMEOUT_MS, Math.min(MAX_TEXT_MODEL_TIMEOUT_MS, Math.round(value)))
+}
+
+function getTextModelTimeoutMs(textConfig: any) {
+  const settings = textConfig?.settings && typeof textConfig.settings === 'object' ? textConfig.settings : {}
+  const timeoutMs = settings.timeoutMs
+    ?? settings.timeout_ms
+    ?? settings.requestTimeoutMs
+    ?? settings.request_timeout_ms
+    ?? settings.headersTimeoutMs
+    ?? settings.headers_timeout_ms
+  if (timeoutMs !== undefined && timeoutMs !== null && timeoutMs !== '') {
+    return clampTimeoutMs(Number(timeoutMs))
+  }
+  const timeoutSeconds = settings.timeoutSeconds ?? settings.timeout_seconds
+  if (timeoutSeconds !== undefined && timeoutSeconds !== null && timeoutSeconds !== '') {
+    return clampTimeoutMs(Number(timeoutSeconds) * 1000)
+  }
+  return DEFAULT_TEXT_MODEL_TIMEOUT_MS
+}
+
+function normalizeHeaders(headers: any) {
+  const normalized: Record<string, string> = {}
+  new Headers(headers || {}).forEach((value, key) => {
+    normalized[key] = value
+  })
+  return normalized
+}
+
+function normalizeBody(body: any) {
+  if (body === undefined || body === null) return undefined
+  if (typeof body === 'string') return Buffer.from(body)
+  if (body instanceof Uint8Array) return Buffer.from(body)
+  if (body instanceof ArrayBuffer) return Buffer.from(body)
+  return Buffer.from(String(body))
+}
+
+function createTextModelFetch(timeoutMs: number) {
+  return async (input: any, init: any = {}) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input.toString() : input.url)
+    const body = normalizeBody(init.body)
+    const transport = url.protocol === 'https:' ? httpsRequest : httpRequest
+
+    return await new Promise<Response>((resolve, reject) => {
+      const req = transport({
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: init.method || (body ? 'POST' : 'GET'),
+        headers: normalizeHeaders(init.headers),
+        timeout: timeoutMs,
+      }, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+        res.on('end', () => {
+          const responseHeaders = new Headers()
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) {
+              value.forEach((item) => responseHeaders.append(key, String(item)))
+            } else if (value !== undefined) {
+              responseHeaders.set(key, String(value))
+            }
+          }
+          resolve(new Response(Buffer.concat(chunks), {
+            status: res.statusCode || 200,
+            statusText: res.statusMessage,
+            headers: responseHeaders,
+          }))
+        })
+      })
+
+      const abort = () => req.destroy(new Error('Text model request aborted'))
+      if (init.signal) {
+        if (init.signal.aborted) {
+          abort()
+          return
+        }
+        init.signal.addEventListener('abort', abort, { once: true })
+      }
+
+      req.on('timeout', () => req.destroy(new Error(`Text model request timed out after ${timeoutMs}ms`)))
+      req.on('error', reject)
+      if (body) req.write(body)
+      req.end()
+    })
+  }
+}
 
 function getAgentConfig(agentType: string) {
   const rows = db.select().from(schema.agentConfigs)
@@ -185,15 +283,18 @@ function getModel(dbConfig: any, textConfigId?: number | null) {
   const textConfig = textConfigId ? getConfigById(textConfigId) || getTextConfig() : getTextConfig()
   const resolvedBaseURL = getTextProviderBaseUrl(textConfig)
   const modelName = textConfigId ? textConfig.model : (dbConfig?.model || textConfig.model)
+  const timeoutMs = getTextModelTimeoutMs(textConfig)
   logTaskProgress('AIConfig', 'text-model-endpoint', {
     textConfigId: textConfigId || null,
     provider: textConfig.provider,
     baseUrl: resolvedBaseURL,
     model: modelName,
+    timeoutMs,
   })
   const provider = createOpenAI({
     baseURL: resolvedBaseURL,
     apiKey: textConfig.apiKey,
+    fetch: createTextModelFetch(timeoutMs),
   } as any)
   return provider.chat(modelName)
 }

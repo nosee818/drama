@@ -328,6 +328,16 @@
           <span class="mono">{{ endpointHint }}</span>
         </div>
         <label class="field"><span class="field-label">模型（逗号分隔）</span><input v-model="cfgForm.modelStr" class="input" placeholder="model-name" /></label>
+        <div v-if="cfgForm.service_type === 'text'" class="field video-capability-panel">
+          <div class="field-label">文本请求超时</div>
+          <div class="capability-grid">
+            <label class="field capability-number">
+              <span class="field-label">最长等待（分钟）</span>
+              <input v-model.number="cfgForm.textTimeoutMinutes" class="input" type="number" min="1" max="60" />
+            </label>
+          </div>
+          <span class="field-hint">本地大模型响应慢时建议填 20-30 分钟。保存后会写入 timeoutMs，避免分镜、改写等任务在 5 分钟左右被 Headers Timeout 中断。</span>
+        </div>
         <div v-if="cfgForm.service_type === 'video'" class="field video-capability-panel">
           <div class="field-label">视频参考图能力</div>
           <div class="capability-grid">
@@ -472,6 +482,7 @@ const cfgForm = reactive({
   supportsFirstLast: false,
   supportsMultipleReferences: false,
   maxReferenceImages: 1,
+  textTimeoutMinutes: 20,
 })
 const huobaoForm = reactive({ apiKey: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
@@ -527,6 +538,12 @@ const endpointPrefixes = {
   custom: '',
 }
 
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return fallback
+  return Math.max(min, Math.min(max, Math.round(num)))
+}
+
 const endpointHint = computed(() => {
   const provider = cfgForm.provider
   const base = (cfgForm.base_url || 'https://...').split(/[\n,]+/).map(item => item.trim()).filter(Boolean)[0] || 'https://...'
@@ -553,11 +570,15 @@ function applyProviderPreset(type, provider) {
   cfgForm.modelStr = preset.models.join(', ')
   cfgForm.name = `${preset.label}-${serviceMeta[type].label}`
   applyVideoCapabilityForm(readSettingsObject(cfgForm.settingsStr))
+  applyTextTimeoutForm(readSettingsObject(cfgForm.settingsStr))
 }
 
 function normalizeSettingsInput() {
   const raw = cfgForm.settingsStr.trim()
   const settings = raw ? JSON.parse(raw) : {}
+  if (cfgForm.service_type === 'text') {
+    settings.timeoutMs = clampNumber(cfgForm.textTimeoutMinutes, 1, 60, 20) * 60 * 1000
+  }
   if (cfgForm.service_type === 'video') {
     settings.supportsFirstLast = !!cfgForm.supportsFirstLast
     settings.supportsMultipleReferences = !!cfgForm.supportsMultipleReferences
@@ -580,6 +601,22 @@ function applyVideoCapabilityForm(settings = {}) {
   cfgForm.maxReferenceImages = Math.max(1, Number(settings.maxReferenceImages ?? settings.max_reference_images ?? settings.capabilities?.maxReferenceImages ?? settings.capabilities?.max_reference_images ?? (likelyMultiProvider ? 3 : 1)))
 }
 
+function applyTextTimeoutForm(settings = {}) {
+  const timeoutMs = settings.timeoutMs
+    ?? settings.timeout_ms
+    ?? settings.requestTimeoutMs
+    ?? settings.request_timeout_ms
+    ?? settings.headersTimeoutMs
+    ?? settings.headers_timeout_ms
+  const timeoutSeconds = settings.timeoutSeconds ?? settings.timeout_seconds
+  const minutes = timeoutMs !== undefined && timeoutMs !== null && timeoutMs !== ''
+    ? Number(timeoutMs) / 60000
+    : timeoutSeconds !== undefined && timeoutSeconds !== null && timeoutSeconds !== ''
+      ? Number(timeoutSeconds) / 60
+      : 20
+  cfgForm.textTimeoutMinutes = clampNumber(minutes, 1, 60, 20)
+}
+
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
 async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() }
 async function setDefaultCfg(c) {
@@ -591,7 +628,7 @@ async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0, supportsFirstLast: false, supportsMultipleReferences: false, maxReferenceImages: 1 })
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0, supportsFirstLast: false, supportsMultipleReferences: false, maxReferenceImages: 1, textTimeoutMinutes: 20 })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -611,7 +648,9 @@ function startEditCfg(c) {
     service_type: c.service_type,
     priority: c.priority ?? 0,
   })
-  applyVideoCapabilityForm(readSettingsObject(c.settings))
+  const settings = readSettingsObject(c.settings)
+  applyVideoCapabilityForm(settings)
+  applyTextTimeoutForm(settings)
   cfgDialog.value = true
 }
 async function testCfgPayload(payload) {
@@ -750,7 +789,7 @@ const defaultPrompts = {
 4. 对每个角色调用 assign_voice 分配音色，并说明选择理由
 
 注意：每个角色都必须分配音色，不要遗漏。`,
-  grid_prompt_generator: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的英文提示词。
+  grid_prompt_generator: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的中文提示词。
 
 你将收到用户的请求，告知要生成哪种类型的提示词：
 - "角色" → 生成角色图片提示词
@@ -768,8 +807,9 @@ const defaultPrompts = {
 
 工作流程：
 1. 调用 read_scenes 读取所有场景信息
-2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成英文提示词
-3. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[电影感场景]，[高质量]，[无文字水印]
+2. 根据场景地点（location）、时间段（time）、已有描述（prompt）生成中文提示词
+3. 场景图必须是空场景，只表现环境，不允许出现任何人物、脸、身体、手、剪影、人群或角色
+4. 提示词结构：[地点]，[时间/光线/氛围]，[已有描述]，[空场景/纯环境背景/无人物]，[电影感场景]，[高质量]，[无文字水印]
 
 ## 宫格图提示词（参考 skills/grid-image-generator/SKILL.md）
 
@@ -782,9 +822,10 @@ const defaultPrompts = {
 3. 返回 grid_prompt（整体提示词）和 cell_prompts（每格提示词）
 
 提示词规范：
-- 使用英文提示词
-- 必须包含 "consistent art style" 保持风格统一
-- 必须包含 "cinematic quality"
+- 使用中文提示词
+- 场景图片必须包含“空场景、纯环境背景、无人物”，并明确排除人物、脸、身体、手、剪影、人群或角色
+- 必须包含“统一美术风格”保持风格统一
+- 必须包含“电影级画质”
 - 避免出现文字或水印`,
 }
 

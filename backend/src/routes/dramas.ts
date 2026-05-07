@@ -46,6 +46,14 @@ function normalizeStyle(style?: string | null) {
   return String(style || 'realistic').trim() || 'realistic'
 }
 
+function emptyScenePrompt(prompt: string) {
+  const base = String(prompt || '').trim()
+  const guard = '空场景，纯环境背景，没有任何人物、脸、身体、手、剪影、人群或角色，重点表现空间结构、陈设、光线和氛围，不要文字、签名或水印'
+  if (!base) return guard
+  if (/空场景|无人|无人物|不要出现人物|没有任何人物/.test(base)) return base
+  return `${base}，${guard}`
+}
+
 async function readCreateBody(c: any) {
   const contentType = c.req.header('content-type') || ''
   if (!contentType.includes('multipart/form-data')) {
@@ -487,7 +495,7 @@ async function ensureSceneImages(ep: any, drama: any) {
     const genId = await generateImage({
       sceneId: scene.id,
       dramaId: drama.id,
-      prompt: scene.prompt || `${scene.location}，${scene.time || ''}，高质量场景图，电影感，清晰空间结构和光线氛围`,
+      prompt: emptyScenePrompt(scene.prompt || `${scene.location}，${scene.time || ''}，高质量场景图，电影感，清晰空间结构和光线氛围`),
       size: orientationImageSize(dramaOrientation(drama)),
       configId: getProjectImageConfigId(drama, 'scene', ep.imageConfigId),
     })

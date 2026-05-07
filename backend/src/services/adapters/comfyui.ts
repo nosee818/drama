@@ -35,6 +35,42 @@ function renderWorkflow(workflow: any, values: Record<string, any>): any {
   return workflow.replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] == null ? '' : String(values[key]))
 }
 
+function isBlankImageName(value: any) {
+  return typeof value === 'string' && !value.trim()
+}
+
+function isNodeLink(value: any, removedIds: Set<string>) {
+  return Array.isArray(value)
+    && value.length >= 2
+    && typeof value[0] === 'string'
+    && removedIds.has(value[0])
+    && typeof value[1] === 'number'
+}
+
+function pruneUnavailableLoadImageNodes(workflow: any) {
+  if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) return workflow
+
+  const removedIds = new Set<string>()
+  for (const [id, node] of Object.entries(workflow) as any[]) {
+    if (node?.class_type === 'LoadImage' && isBlankImageName(node?.inputs?.image)) {
+      removedIds.add(String(id))
+    }
+  }
+  if (!removedIds.size) return workflow
+
+  for (const id of removedIds) delete workflow[id]
+
+  for (const node of Object.values(workflow) as any[]) {
+    if (!node?.inputs || typeof node.inputs !== 'object') continue
+    for (const [inputName, inputValue] of Object.entries(node.inputs)) {
+      if (isNodeLink(inputValue, removedIds)) {
+        delete node.inputs[inputName]
+      }
+    }
+  }
+  return workflow
+}
+
 function headers(config: AIConfig) {
   return {
     'Content-Type': 'application/json',
@@ -79,7 +115,7 @@ class ComfyUIBase {
   protected buildPromptRequest(config: AIConfig, values: Record<string, any>): ProviderRequest {
     this.currentConfig = config
     const settings = config.settings || {}
-    const workflow = renderWorkflow(parseWorkflow(settings), values)
+    const workflow = pruneUnavailableLoadImageNodes(renderWorkflow(parseWorkflow(settings), values))
     return {
       url: joinProviderUrl(config.baseUrl, '', config.endpoint || settings.endpoint || '/prompt'),
       method: 'POST',

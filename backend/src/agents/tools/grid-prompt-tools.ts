@@ -103,7 +103,7 @@ export function createGridPromptTools(episodeId: number, dramaId: number) {
       if (s.prompt) parts.push(s.prompt)
 
       const base = parts.join(', ')
-      const prompt = `${base}，电影级场景画面，氛围光影，高质量，统一美术风格，纯背景，不要出现人物、文字、签名或水印`
+      const prompt = `${base}，空场景，纯环境背景，没有任何人物、脸、身体、手、剪影、人群或角色，电影级场景画面，重点表现空间结构、陈设、光线和氛围，高质量，统一美术风格，不要文字、签名或水印`
 
       return {
         scene_id: s.id,

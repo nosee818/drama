@@ -247,7 +247,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
             dramaId,
             location: scene.location,
             time: scene.time || '',
-            prompt: scene.prompt || scene.location,
+            prompt: scene.prompt || `${scene.location}，${scene.time || ''}，空场景，纯环境背景，无人物，突出空间结构、陈设、光线和氛围`,
             createdAt: ts,
             updatedAt: ts,
           }).run()

@@ -484,7 +484,7 @@
                     </div>
                   </div>
                   <div class="shot-body">
-                    <div class="shot-desc">{{ sb.description || sb.title || '无描述' }}</div>
+                    <div class="shot-desc">{{ getShotDisplayText(sb) }}</div>
                     <div class="reference-strip compact" v-if="getShotReferenceAssets(sb).length">
                       <span
                         v-for="asset in getShotReferenceAssets(sb)"
@@ -519,7 +519,7 @@
                 <div class="detail-hero">
                   <div class="detail-hero-copy">
                     <div class="detail-hero-label">镜头概览</div>
-                    <div class="detail-hero-text">{{ selectedSb.description || selectedSb.title || '当前镜头还没有画面描述，建议先补充核心动作和构图。' }}</div>
+                    <div class="detail-hero-text">{{ getShotDisplayText(selectedSb) }}</div>
                     <div class="detail-status-row">
                       <span class="tag">{{ getSceneName(selectedSb) }}</span>
                       <span class="tag">{{ selectedSb.angle || '未设角度' }}</span>
@@ -536,6 +536,27 @@
                         :class="['reference-chip', asset.ready ? 'is-ready' : 'is-missing']"
                         :title="asset.ready ? '会作为参考图传入生图接口' : '尚未生成，暂时不会传入参考图'"
                       >{{ asset.label }}</span>
+                    </div>
+                    <div class="shot-prompt-editor">
+                      <div class="shot-prompt-editor-head">
+                        <span>镜头图片提示词</span>
+                        <span :class="['prompt-lock-state', isShotPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
+                          {{ isShotPromptDirty(selectedSb) ? '有修改未保存' : '已锁定' }}
+                        </span>
+                      </div>
+                      <textarea
+                        :value="getShotPromptDraft(selectedSb)"
+                        class="mini-textarea shot-prompt-textarea"
+                        rows="4"
+                        placeholder="用于镜头图片/首帧/尾帧生成，会同步到镜头图片页面"
+                        @input="setShotPromptDraft(selectedSb, $event.target.value)"
+                      />
+                      <div class="shot-prompt-editor-actions">
+                        <button class="btn btn-sm" :disabled="isSavingShotPrompt(selectedSb)" @click="saveShotImagePrompt(selectedSb)">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                          {{ isSavingShotPrompt(selectedSb) ? '保存中' : '保存并锁定' }}
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <div class="detail-preview-grid">
@@ -700,9 +721,22 @@
                     <span class="detail-section-copy">分别服务图片、视频、配乐和音效生成</span>
                   </div>
                   <label class="field">
-                    <span class="field-label">静态画面提示词</span>
-                    <textarea :value="selectedSb.image_prompt || selectedSb.imagePrompt || ''" class="textarea" rows="4"
-                      @blur="updateField(selectedSb, 'image_prompt', $event.target.value)" placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词" />
+                    <span class="field-label">镜头图片提示词</span>
+                    <textarea
+                      :value="getShotPromptDraft(selectedSb)"
+                      class="textarea"
+                      rows="4"
+                      placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词"
+                      @input="setShotPromptDraft(selectedSb, $event.target.value)"
+                    />
+                    <div class="prompt-field-actions">
+                      <span :class="['prompt-lock-state', isShotPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
+                        {{ isShotPromptDirty(selectedSb) ? '有修改未保存' : '已锁定并用于生图' }}
+                      </span>
+                      <button class="btn btn-sm" :disabled="isSavingShotPrompt(selectedSb)" @click="saveShotImagePrompt(selectedSb)">
+                        {{ isSavingShotPrompt(selectedSb) ? '保存中' : '保存并锁定' }}
+                      </button>
+                    </div>
                   </label>
                   <label class="field">
                     <span class="field-label">视频提示词</span>
@@ -728,7 +762,7 @@
 
           <div v-else-if="rn && rt === 'storyboard_breaker'" class="step-loading">
             <Loader2 :size="24" class="animate-spin" style="color:var(--accent)" />
-            <div class="loading-text">正在拆解分镜并生成提示词...</div>
+            <div class="loading-text">{{ runningMessage || '正在拆解分镜并生成提示词...' }}</div>
           </div>
 
           <div v-else class="step-empty">
@@ -964,6 +998,10 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
                   查看当前宫格图
                 </button>
+                <button class="btn btn-sm" @click="batchShotFrames">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量生成
+                </button>
                 <button class="btn btn-primary btn-sm" @click="openGridTool">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   宫格图工具
@@ -1035,7 +1073,25 @@
                       <span class="frame-num">#{{ String(i+1).padStart(2,'0') }}</span>
                       <span class="frame-badge">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     </div>
-                    <div class="frame-desc">{{ sb.description || sb.title || '—' }}</div>
+                    <div class="frame-desc">{{ getShotDisplayText(sb) }}</div>
+                    <label class="prompt-edit-block frame-prompt-editor" @click.stop>
+                      <span>镜头图片提示词</span>
+                      <textarea
+                        :value="getShotPromptDraft(sb)"
+                        class="mini-textarea"
+                        rows="3"
+                        placeholder="修改后保存并锁定，再生成或重新生成图片"
+                        @input="setShotPromptDraft(sb, $event.target.value)"
+                      />
+                      <div class="frame-prompt-actions">
+                        <span :class="['prompt-lock-state', isShotPromptDirty(sb) ? 'is-dirty' : 'is-locked']">
+                          {{ isShotPromptDirty(sb) ? '未保存' : '已锁定' }}
+                        </span>
+                        <button class="btn btn-sm" :disabled="isSavingShotPrompt(sb)" @click.stop="saveShotImagePrompt(sb)">
+                          {{ isSavingShotPrompt(sb) ? '保存中' : '保存' }}
+                        </button>
+                      </div>
+                    </label>
                     <div class="frame-meta">
                       <span :class="['dot', getFirstFrame(sb) && 'ok', isPendingShotFrame(sb.id, 'first_frame') && 'pending']" />
                       <span class="dim" style="font-size:11px">首帧</span>
@@ -1043,6 +1099,19 @@
                         <span :class="['dot', getLastFrame(sb) && 'ok', isPendingShotFrame(sb.id, 'last_frame') && 'pending']" />
                         <span class="dim" style="font-size:11px">尾帧</span>
                       </span>
+                    </div>
+                    <div class="frame-action-row" @click.stop>
+                      <button class="btn btn-sm" :disabled="isPendingShotFrame(sb.id, 'first_frame')" @click="genShotFrame(sb, 'first_frame')">
+                        {{ isPendingShotFrame(sb.id, 'first_frame') ? '首帧生成中' : (getFirstFrame(sb) ? '重新生成首帧' : '生成首帧') }}
+                      </button>
+                      <button
+                        v-if="frameMode === 'first_last'"
+                        class="btn btn-sm"
+                        :disabled="isPendingShotFrame(sb.id, 'last_frame')"
+                        @click="genShotFrame(sb, 'last_frame')"
+                      >
+                        {{ isPendingShotFrame(sb.id, 'last_frame') ? '尾帧生成中' : (getLastFrame(sb) ? '重新生成尾帧' : '生成尾帧') }}
+                      </button>
                     </div>
                   </div>
                   <!-- Thumbnails -->
@@ -1055,7 +1124,11 @@
                           class="previewable-image"
                           @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
                         />
-                        <div v-else class="frame-thumb-empty">
+                        <div v-if="getFirstFrame(sb) && isPendingShotFrame(sb.id, 'first_frame')" class="frame-thumb-pending">
+                          <Loader2 :size="14" class="animate-spin" />
+                          <span>生成中</span>
+                        </div>
+                        <div v-if="!getFirstFrame(sb)" class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'first_frame')" :size="14" class="animate-spin" />
                           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         </div>
@@ -1073,7 +1146,11 @@
                           class="previewable-image"
                           @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
                         />
-                        <div v-else class="frame-thumb-empty">
+                        <div v-if="getLastFrame(sb) && isPendingShotFrame(sb.id, 'last_frame')" class="frame-thumb-pending">
+                          <Loader2 :size="14" class="animate-spin" />
+                          <span>生成中</span>
+                        </div>
+                        <div v-if="!getLastFrame(sb)" class="frame-thumb-empty">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'last_frame')" :size="14" class="animate-spin" />
                           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         </div>
@@ -1089,6 +1166,32 @@
             </div>
 
             <!-- Grid Tool Dialog -->
+            <div v-if="shotImageBatchDialog.open" class="overlay">
+              <div class="card shot-batch-dialog">
+                <div class="shot-batch-head">
+                  <div>
+                    <div class="setup-kicker">SHOT IMAGES</div>
+                    <h3>批量生成镜头图片</h3>
+                    <p>检测到当前范围里已经有镜头图片。默认只继续生成缺失项，避免误覆盖已经满意的资产。</p>
+                  </div>
+                </div>
+                <div class="shot-batch-stats">
+                  <span class="tag mono">{{ shotImageBatchDialog.missing.length }} 个缺失</span>
+                  <span class="tag mono">{{ shotImageBatchDialog.existing.length }} 个已有</span>
+                  <span class="tag">{{ frameMode === 'first_last' ? '首尾帧' : '仅首帧' }}</span>
+                </div>
+                <div class="shot-batch-actions">
+                  <button class="btn" @click="closeShotImageBatchDialog">取消</button>
+                  <button class="btn btn-primary" @click="continueMissingShotImages">
+                    继续生成缺失
+                  </button>
+                  <button class="btn btn-danger" @click="regenerateAllShotImages">
+                    重新生成全部
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <div v-if="gridDialog" class="overlay">
               <div class="card grid-tool">
                 <div class="grid-tool-head">
@@ -1572,7 +1675,7 @@ const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null)
 const panel = ref('script')
-const { running: rn, runningType: rt, run: runAgent } = useAgent()
+const { running: rn, runningType: rt, runningMessage, run: runAgent, sync: syncAgentRun } = useAgent()
 
 const localRaw = ref(''), localScript = ref('')
 const rawContent = computed(() => episode.value?.content || '')
@@ -1600,6 +1703,9 @@ const prodTabIdx = computed({
   set: (v) => { prodTab.value = prodTabDefs.value[v]?.id || 'chars' },
 })
 const frameMode = ref('first')
+const workspaceViewStorageKey = computed(() => `huobao:episode-view:${dramaId}:${episodeNumber}`)
+const workspaceViewInitialized = ref(false)
+const suspendWorkspaceViewPersist = ref(false)
 const fallbackVoiceProfiles = [
   { id: 'alloy', label: 'Alloy', gender: '中性', traits: '平衡、自然、克制', suitable: '通用叙述、旁白、需要稳定输出的角色' },
   { id: 'echo', label: 'Echo', gender: '男声', traits: '低沉、稳重、冷静', suitable: '成熟男性、父辈、旁白、压迫感角色' },
@@ -1641,6 +1747,8 @@ const pendingComposeIds = ref([])
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
 const activeVideoPolls = new Set()
+const activeImagePolls = new Set()
+const shotImageBatchDialog = ref({ open: false, missing: [], existing: [], all: [] })
 const imageViewer = ref({ open: false, src: '', title: '' })
 const selectedStoryboardTextConfigId = ref(null)
 const storyboardTextConfigStorageKey = computed(() => `huobao:storyboard-text-config:${dramaId}:${episodeNumber}`)
@@ -1736,6 +1844,7 @@ function ensureStoryboardTextConfigSelection() {
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
   restoreStoryboardTextConfigSelection()
+  void syncAgentRun(dramaId, epId.value, refresh)
 })
 
 onBeforeUnmount(() => {
@@ -2321,6 +2430,25 @@ async function loadLatestGridImage() {
   }
 }
 
+async function restoreShotImageGenerationState() {
+  if (!sbs.value.length) return
+  try {
+    const rows = await imageAPI.list({ drama_id: dramaId })
+    const processing = (Array.isArray(rows) ? rows : [])
+      .filter(row => row?.status === 'processing')
+      .filter(row => ['first_frame', 'last_frame'].includes(String(row?.frame_type || row?.frameType || '')))
+      .filter(row => sbs.value.some(sb => sb.id === Number(row?.storyboard_id || row?.storyboardId)))
+
+    for (const row of processing) {
+      const storyboardId = Number(row?.storyboard_id || row?.storyboardId)
+      const frameType = String(row?.frame_type || row?.frameType)
+      const key = framePendingKey(storyboardId, frameType)
+      if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
+      pollShotFrameGeneration(row?.id, storyboardId, frameType)
+    }
+  } catch {}
+}
+
 async function doGridSplit() {
   const { rows, cols } = gridActualLayout.value
   try {
@@ -2499,6 +2627,69 @@ const activeSubStepKey = computed(() => {
   return 'export:merge'
 })
 
+function inferDefaultScriptStep(epHasContent, epHasScript, epHasSbs) {
+  if (epHasSbs) return 4
+  if (epHasScript && (audioSkipped.value || chars.value.some(c => c.voice_style || c.voiceStyle))) return 3
+  if (epHasScript && chars.value.length) return 2
+  if (epHasScript || epHasContent) return 1
+  return 0
+}
+
+function applySubStepKey(key) {
+  if (key?.startsWith('script:')) {
+    panel.value = 'script'
+    const stepMap = {
+      'script:raw': 0,
+      'script:rewrite': 1,
+      'script:extract': 2,
+      'script:voice': 3,
+      'script:storyboard': 4,
+    }
+    scriptStep.value = stepMap[key] ?? 0
+    return true
+  }
+  if (key?.startsWith('prod:')) {
+    const nextTab = key.replace('prod:', '')
+    if (!prodTabDefs.value.some(t => t.id === nextTab)) return false
+    panel.value = 'production'
+    prodTab.value = nextTab
+    return true
+  }
+  if (key === 'export:merge') {
+    panel.value = 'export'
+    return true
+  }
+  return false
+}
+
+function persistWorkspaceView(key = activeSubStepKey.value) {
+  if (typeof window === 'undefined' || suspendWorkspaceViewPersist.value) return
+  window.localStorage.setItem(workspaceViewStorageKey.value, JSON.stringify({
+    key,
+    frameMode: frameMode.value,
+  }))
+}
+
+function restoreWorkspaceView() {
+  if (typeof window === 'undefined') return false
+  const raw = window.localStorage.getItem(workspaceViewStorageKey.value)
+  if (!raw) return false
+  try {
+    const saved = JSON.parse(raw)
+    if (saved?.frameMode) frameMode.value = saved.frameMode
+    return applySubStepKey(saved?.key)
+  } catch {
+    return applySubStepKey(raw)
+  }
+}
+
+watch(activeSubStepKey, (key) => {
+  persistWorkspaceView(key)
+})
+watch(frameMode, () => {
+  persistWorkspaceView()
+})
+
 const sidebarJumpSteps = computed(() => {
   const section = sidebarSections.value.find((item) => item.items.some(step => step.key === activeSubStepKey.value))
   return section?.items || []
@@ -2533,24 +2724,7 @@ const activeBubbleKey = computed(() => {
 const showBottomBubble = computed(() => panel.value === 'script' || panel.value === 'production')
 
 function goSubStep(key) {
-  if (key.startsWith('script:')) {
-    panel.value = 'script'
-    const stepMap = {
-      'script:raw': 0,
-      'script:rewrite': 1,
-      'script:extract': 2,
-      'script:voice': 3,
-      'script:storyboard': 4,
-    }
-    scriptStep.value = stepMap[key] ?? 0
-    return
-  }
-  if (key.startsWith('prod:')) {
-    panel.value = 'production'
-    prodTab.value = key.replace('prod:', '')
-    return
-  }
-  panel.value = 'export'
+  if (applySubStepKey(key)) persistWorkspaceView(key)
 }
 
 const pipelineProgress = computed(() => {
@@ -2649,6 +2823,8 @@ function getVoiceProfile(voiceId) {
 const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duration || 10), 0))
 
 const selectedSb = ref(null)
+const shotPromptDrafts = ref({})
+const savingShotPromptIds = ref([])
 const shotTypes = [
   '大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写',
   '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
@@ -2664,6 +2840,66 @@ function updateField(sb, field, value) {
   const camelField = toCamel(field)
   if (camelField !== field) sb[camelField] = value
   storyboardAPI.update(sb.id, { [field]: value })
+}
+
+function getShotImagePromptValue(sb) {
+  return String(sb?.image_prompt || sb?.imagePrompt || '').trim()
+}
+
+function getShotDisplayText(sb) {
+  return getShotImagePromptValue(sb) || sb?.description || sb?.title || '当前镜头还没有画面描述，建议先补充核心动作和构图。'
+}
+
+function getShotPromptDraft(sb) {
+  if (!sb?.id) return ''
+  const key = String(sb.id)
+  if (Object.prototype.hasOwnProperty.call(shotPromptDrafts.value, key)) return shotPromptDrafts.value[key]
+  return getShotImagePromptValue(sb)
+}
+
+function setShotPromptDraft(sb, value) {
+  if (!sb?.id) return
+  shotPromptDrafts.value = { ...shotPromptDrafts.value, [String(sb.id)]: value }
+}
+
+function isShotPromptDirty(sb) {
+  if (!sb?.id) return false
+  const key = String(sb.id)
+  if (!Object.prototype.hasOwnProperty.call(shotPromptDrafts.value, key)) return false
+  return String(shotPromptDrafts.value[key] || '').trim() !== getShotImagePromptValue(sb)
+}
+
+function isSavingShotPrompt(sb) {
+  return !!sb?.id && savingShotPromptIds.value.includes(sb.id)
+}
+
+async function saveShotImagePrompt(sb, options = {}) {
+  if (!sb?.id) return
+  const next = String(getShotPromptDraft(sb) || '').trim()
+  const current = getShotImagePromptValue(sb)
+  if (next === current) {
+    const key = String(sb.id)
+    if (Object.prototype.hasOwnProperty.call(shotPromptDrafts.value, key)) {
+      const { [key]: _drop, ...rest } = shotPromptDrafts.value
+      shotPromptDrafts.value = rest
+    }
+    if (!options.silent) toast.info('镜头图片提示词已是最新')
+    return
+  }
+  if (!savingShotPromptIds.value.includes(sb.id)) savingShotPromptIds.value.push(sb.id)
+  try {
+    sb.image_prompt = next
+    sb.imagePrompt = next
+    await storyboardAPI.update(sb.id, { image_prompt: next })
+    const key = String(sb.id)
+    const { [key]: _drop, ...rest } = shotPromptDrafts.value
+    shotPromptDrafts.value = rest
+    if (!options.silent) toast.success('镜头图片提示词已保存并锁定')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingShotPromptIds.value = savingShotPromptIds.value.filter(id => id !== sb.id)
+  }
 }
 
 function toCamel(field) {
@@ -2734,18 +2970,30 @@ async function refresh() {
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = await episodeAPI.storyboards(ep.id)
-      if (sbs.value.length && !selectedSb.value) selectedSb.value = sbs.value[0]
+      if (sbs.value.length) {
+        selectedSb.value = selectedSb.value
+          ? (sbs.value.find(sb => sb.id === selectedSb.value.id) || sbs.value[0])
+          : sbs.value[0]
+      } else {
+        selectedSb.value = null
+      }
 
       const epHasContent = !!(episode.value?.content)
       const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
       const epHasSbs = sbs.value.length > 0
 
-      if (epHasSbs) scriptStep.value = 4
-      else if (epHasScript && (audioSkipped.value || chars.value.some(c => c.voice_style || c.voiceStyle))) scriptStep.value = 3
-      else if (epHasScript && chars.value.length) scriptStep.value = 2
-      else if (epHasScript || epHasContent) scriptStep.value = 1
-      else scriptStep.value = 0
+      if (!workspaceViewInitialized.value) {
+        suspendWorkspaceViewPersist.value = true
+        scriptStep.value = inferDefaultScriptStep(epHasContent, epHasScript, epHasSbs)
+        restoreWorkspaceView()
+        workspaceViewInitialized.value = true
+        setTimeout(() => {
+          suspendWorkspaceViewPersist.value = false
+          persistWorkspaceView()
+        }, 0)
+      }
       await loadLatestGridImage()
+      await restoreShotImageGenerationState()
       await restoreVideoGenerationState()
     }
   } catch (e) {
@@ -3061,33 +3309,128 @@ function buildShotImagePrompt(sb, frameType) {
   ].filter(Boolean).join('；')
 }
 
-async function genShotFrame(sb, frameType) {
+function shotFrameTargets() {
+  const frameTypes = frameMode.value === 'first_last' ? ['first_frame', 'last_frame'] : ['first_frame']
+  return sbs.value.flatMap(sb => frameTypes.map(frameType => ({ sb, frameType })))
+}
+
+function shotFrameExists(sb, frameType) {
+  return frameType === 'first_frame' ? !!getFirstFrame(sb) : !!getLastFrame(sb)
+}
+
+function closeShotImageBatchDialog() {
+  shotImageBatchDialog.value = { open: false, missing: [], existing: [], all: [] }
+}
+
+function batchShotFrames() {
+  const all = shotFrameTargets()
+  if (!all.length) {
+    toast.info('还没有可生成的镜头')
+    return
+  }
+  const existing = all.filter(({ sb, frameType }) => shotFrameExists(sb, frameType))
+  const missing = all.filter(({ sb, frameType }) => !shotFrameExists(sb, frameType))
+  if (existing.length) {
+    shotImageBatchDialog.value = { open: true, missing, existing, all }
+    return
+  }
+  startShotFrameBatch(missing)
+}
+
+function continueMissingShotImages() {
+  const targets = shotImageBatchDialog.value.missing || []
+  closeShotImageBatchDialog()
+  if (!targets.length) {
+    toast.info('当前没有缺失的镜头图片')
+    return
+  }
+  startShotFrameBatch(targets)
+}
+
+function regenerateAllShotImages() {
+  const targets = shotImageBatchDialog.value.all || []
+  closeShotImageBatchDialog()
+  startShotFrameBatch(targets)
+}
+
+function startShotFrameBatch(targets) {
+  const uniqueTargets = []
+  const seen = new Set()
+  for (const target of targets) {
+    const key = framePendingKey(target.sb.id, target.frameType)
+    if (seen.has(key)) continue
+    seen.add(key)
+    uniqueTargets.push(target)
+  }
+  if (!uniqueTargets.length) {
+    toast.info('没有需要生成的镜头图片')
+    return
+  }
+  uniqueTargets.forEach(({ sb, frameType }) => {
+    const key = framePendingKey(sb.id, frameType)
+    if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
+  })
+  toast.success(`已下发 ${uniqueTargets.length} 个镜头图片任务`)
+  uniqueTargets.forEach(({ sb, frameType }) => {
+    requestShotFrameGeneration(sb, frameType).catch((e) => {
+      pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== framePendingKey(sb.id, frameType))
+      toast.error(e.message)
+    })
+  })
+}
+
+async function requestShotFrameGeneration(sb, frameType) {
+  if (isShotPromptDirty(sb)) await saveShotImagePrompt(sb, { silent: true })
   const prompt = buildShotImagePrompt(sb, frameType)
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
+  if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
+  const body = {
+    storyboard_id: sb.id,
+    drama_id: dramaId,
+    prompt,
+    frame_type: frameType,
+    config_id: activeShotImageConfig.value?.id,
+    reference_images: referenceImages.length ? referenceImages : undefined,
+  }
+  const generation = await imageAPI.generate(body)
+  await refresh()
+  pollShotFrameGeneration(generation?.id, sb.id, frameType)
+  return generation
+}
+
+async function genShotFrame(sb, frameType) {
   try {
-    if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
-    const body = {
-      storyboard_id: sb.id,
-      drama_id: dramaId,
-      prompt,
-      frame_type: frameType,
-      config_id: activeShotImageConfig.value?.id,
-      reference_images: referenceImages.length ? referenceImages : undefined,
-    }
-    await imageAPI.generate(body)
+    await requestShotFrameGeneration(sb, frameType)
     toast.success(frameType === 'first_frame' ? '首帧生成中' : '尾帧生成中')
-    await refresh()
-    watchAsyncResult(() => {
-      const target = sbs.value.find(s => s.id === sb.id)
-      const done = frameType === 'first_frame' ? !!getFirstFrame(target) : !!getLastFrame(target)
-      if (done) pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
-      return done
-    })
   } catch (e) {
-    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== framePendingKey(sb.id, frameType))
     toast.error(e.message)
   }
+}
+
+function pollShotFrameGeneration(generationId, storyboardId, frameType) {
+  const key = framePendingKey(storyboardId, frameType)
+  const pollKey = `${generationId || 'storyboard'}:${storyboardId}:${frameType}`
+  if (activeImagePolls.has(pollKey)) return
+  activeImagePolls.add(pollKey)
+  const finish = () => {
+    activeImagePolls.delete(pollKey)
+    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+  }
+  if (!generationId) {
+    watchAsyncResult(() => false, 1, 1000)
+    activeImagePolls.delete(pollKey)
+    return
+  }
+  watchImageGeneration(generationId, () => {
+    finish()
+    toast.success(frameType === 'first_frame' ? '首帧生成完成' : '尾帧生成完成')
+  }, (row) => {
+    finish()
+    toast.error(row?.error_msg || row?.errorMsg || '镜头图片生成失败')
+    refresh()
+  }, 180, 5000)
 }
 
 async function genVid(sb) {
@@ -4014,6 +4357,59 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 }
 .detail-hero-text { font-size: 13px; color: var(--text-1); line-height: 1.7; }
 .detail-status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.shot-prompt-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.72);
+  border: 1px solid rgba(76,125,255,0.18);
+}
+.shot-prompt-editor-head,
+.shot-prompt-editor-actions,
+.prompt-field-actions,
+.frame-prompt-actions,
+.frame-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.shot-prompt-editor-head,
+.prompt-field-actions,
+.frame-prompt-actions {
+  justify-content: space-between;
+}
+.shot-prompt-editor-head {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-0);
+}
+.shot-prompt-textarea {
+  min-height: 84px;
+  background: rgba(255,255,255,0.86);
+}
+.prompt-lock-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.prompt-lock-state.is-locked {
+  color: var(--success);
+  background: rgba(47, 125, 83, 0.1);
+}
+.prompt-lock-state.is-dirty {
+  color: var(--warning);
+  background: rgba(181, 132, 32, 0.12);
+}
+.prompt-field-actions {
+  margin-top: 6px;
+}
 .detail-preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .detail-preview-card { display: flex; flex-direction: column; gap: 6px; }
 .detail-preview-title { font-size: 11px; font-weight: 700; color: var(--text-2); }
@@ -4234,7 +4630,7 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
-.frame-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.frame-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .frame-top { display: flex; align-items: center; gap: 8px; }
 .frame-num {
   font-size: 13px; font-family: var(--font-mono); font-weight: 800;
@@ -4253,6 +4649,22 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
   overflow: hidden;
 }
 .frame-meta { display: flex; align-items: center; gap: 6px; }
+.frame-prompt-editor {
+  max-width: 760px;
+  padding: 0;
+  border: 0;
+}
+.frame-prompt-editor .mini-textarea {
+  min-height: 70px;
+  background: rgba(255,255,255,0.82);
+}
+.frame-prompt-actions,
+.frame-action-row {
+  flex-wrap: wrap;
+}
+.frame-action-row {
+  margin-top: 2px;
+}
 .frame-thumbs { display: flex; gap: 8px; flex-shrink: 0; }
 .frame-thumb-wrap { display: flex; flex-direction: column; gap: 3px; align-items: center; }
 .frame-thumb-label { font-size: 10px; font-weight: 600; color: var(--text-3); }
@@ -4265,6 +4677,10 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .frame-thumb:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
 .frame-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .frame-thumb-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.frame-thumb-pending {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  background: rgba(15, 23, 42, 0.42); color: white; font-size: 10px; font-weight: 700;
+}
 .frame-re {
   position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
   border-radius: 50%; background: rgba(0,0,0,0.5); color: #fff;
@@ -4273,6 +4689,13 @@ onMounted(() => { restoreAudioSkip(); refresh(); loadConfigs(); loadVoices() })
 .frame-thumb:hover .frame-re { display: flex; }
 .frame-scroll { flex: 1; overflow-y: auto; padding: 10px 12px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-3); flex-shrink: 0; }
+.shot-batch-dialog { width: min(520px, calc(100vw - 32px)); padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.shot-batch-head h3 { margin: 4px 0 8px; font-size: 24px; font-family: var(--font-display); }
+.shot-batch-head p { margin: 0; color: var(--text-2); line-height: 1.7; }
+.shot-batch-stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.shot-batch-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.btn-danger { color: #b42318; border-color: rgba(180, 35, 24, 0.25); }
+.btn-danger:hover { background: rgba(180, 35, 24, 0.08); border-color: rgba(180, 35, 24, 0.42); }
 .dot.ok { background: var(--success); }
 .dot.pending {
   background: var(--accent-dark);
