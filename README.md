@@ -1,65 +1,62 @@
 # VeryAI 短剧平台
 
-VeryAI 短剧平台是一个面向 AI 短剧生产的工作台，用于从剧本导入、AI 改写、角色/场景提取、分镜、图片、视频到视频与语音合成的一体化制作。
+VeryAI 短剧平台是一套面向短剧内容生产的 AI 工作台，覆盖从剧本导入、剧集拆分、AI 改写、角色与场景设定、分镜拆解、图片生成、视频生成到视频与语音合成的完整流程。
 
-本仓库只建议保存代码和配置模板，不保存 API Key、数据库、上传文件、生成图片、生成视频等运行数据。
+平台适合需要批量制作短剧、测试多模型工作流、管理跨集角色资产和自动化生成素材的团队或个人使用。
 
-## 主要改造
+## 核心能力
 
-- AI 服务配置开放化：文本、图片、视频、音频服务都可以在 Web 设置页自定义 provider、Base URL、模型、端点和高级 JSON。
-- 支持 OpenAI 兼容接口、自定义任务式 API、ComfyUI 工作流 API。
-- ComfyUI 支持多个 Base URL，可按轮询方式分发任务到多台后端。
-- 支持全局默认模型和项目默认模型，剧集工作台可选择语言模型。
-- 支持跳过 TTS，适合没有音色库或暂不需要配音的流程。
-- 支持导入 PDF、Word、TXT、MD 创建项目，并按计划集数自动分配内容。
-- 角色库跨集复用：同名角色在后续集会继承已制作的人物参考图。
-- 角色库支持编辑和重新生成。
-- 分镜、场景图、视频提示词改为中文优先。
-- 自动生成支持全剧、前 N 集、指定集数，并可选择目标阶段：分镜、镜头图片、视频生成、最终合成。
-- 自动生成有任务条、暂停、继续、终止、重新开始和任务日志。
-- 自动生成开始前会检测已有资产，默认“继续补缺”，只有明确选择后才会重置并重新生成。
+- **项目创建**：支持手动输入剧本，也支持导入 PDF、Word、TXT、MD 文件，并按计划集数自动分配内容。
+- **AI 剧本处理**：支持 AI 改写、角色场景提取、音色设计和分镜拆解。
+- **角色库**：跨集复用角色设定、人物参考图和音色样本，同名角色可在后续剧集中继承。
+- **场景库**：为地点、时间、环境氛围生成独立场景资产，便于后续镜头合成。
+- **镜头图片**：支持文生图、图生图和多参考图工作流，可引用角色与场景资产生成镜头首帧。
+- **视频生成**：支持本地或远程视频模型，支持横屏、竖屏项目和不同视频比例。
+- **视频与语音合成**：支持将镜头视频与角色台词配音合成，也可选择是否保留原始视频声音。
+- **自动生成**：可选择生成范围和目标阶段，例如生成到分镜、镜头图片、视频或最终合成。
+- **任务日志**：记录自动生成进度、失败原因和历史任务，刷新页面后仍可查看当前状态。
+- **自定义模型**：文本、图片、视频、音频服务均可在设置页配置 OpenAI 兼容接口、通用任务 API 或 ComfyUI 工作流。
+
+## 适用场景
+
+- 批量短剧生产
+- 小说或剧本转短剧
+- 多模型 A/B 测试
+- 本地 ComfyUI 工作流集成
+- 角色、场景、镜头资产管理
+- AI 视频生产流程验证
 
 ## 技术栈
 
 ```text
 frontend/   Nuxt 3 + Vue 3
 backend/    Hono + Drizzle ORM + Mastra Agents + better-sqlite3
+skills/     Agent 技能与提示词
 configs/    配置模板
-data/       本地数据库和生成资产，默认不提交
-skills/     Agent 技能提示词
+data/       本地数据库与运行资产，默认不提交
 ```
 
 ## 环境要求
 
 | 软件 | 用途 |
-|---|---|
+| --- | --- |
 | Node.js 20+ | 前后端运行 |
 | npm 9+ | 依赖安装 |
-| FFmpeg | 视频合成、拼接 |
+| FFmpeg | 视频合成与拼接 |
 | poppler-utils | PDF 文本解析，提供 `pdftotext` |
 | unzip | DOCX 文本解析 |
 
-Ubuntu / Debian 示例：
+Ubuntu / Debian 安装示例：
 
 ```bash
 sudo apt update
 sudo apt install -y ffmpeg poppler-utils unzip
 ```
 
-验证：
-
-```bash
-node -v
-npm -v
-ffmpeg -version
-pdftotext -v
-unzip -v
-```
-
 ## 安装
 
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:nosee818/drama.git
 cd drama
 
 cd backend
@@ -71,34 +68,34 @@ npm install
 
 ## 配置
 
-复制配置模板：
+复制本地配置模板：
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
 ```
 
-`configs/config.yaml` 是本地配置文件，默认不会提交到 Git。
-
-AI 服务 API Key 不建议写入仓库文件。请在 Web 设置页中配置：
+API Key、数据库、上传文件和生成资产不应提交到仓库。建议在 Web 设置页配置模型服务：
 
 - 文本模型
 - 图片模型
 - 视频模型
-- TTS / 音频模型
+- 音频 / TTS 模型
 - ComfyUI 工作流
 - 自定义 OpenAI 兼容接口
 - 自定义任务式接口
 
-## 开发运行
+多服务地址可以在 Base URL 中按行填写。平台会根据服务类型和配置策略进行轮询或任务分发。
 
-后端：
+## 运行
+
+启动后端：
 
 ```bash
 cd backend
 npm run dev
 ```
 
-前端：
+启动前端：
 
 ```bash
 cd frontend
@@ -112,26 +109,26 @@ npm run dev --host 0.0.0.0
 
 ## 后台运行
 
-如果希望关掉终端后仍然运行，可以用 systemd。
+生产或长期测试环境建议使用 `systemd`、`pm2`、`screen` 或 `tmux` 托管进程。
 
-示例服务名：
+systemd 服务名示例：
 
-```bash
-huobao-backend.service
-huobao-frontend.service
+```text
+veryai-backend.service
+veryai-frontend.service
 ```
 
 常用命令：
 
 ```bash
-sudo systemctl start huobao-backend.service huobao-frontend.service
-sudo systemctl restart huobao-backend.service huobao-frontend.service
-sudo systemctl status huobao-backend.service huobao-frontend.service
+sudo systemctl start veryai-backend.service veryai-frontend.service
+sudo systemctl restart veryai-backend.service veryai-frontend.service
+sudo systemctl status veryai-backend.service veryai-frontend.service
 ```
 
 ## 文件导入
 
-创建短剧项目时支持导入：
+创建项目时支持：
 
 - `.pdf`
 - `.docx`
@@ -141,86 +138,73 @@ sudo systemctl status huobao-backend.service huobao-frontend.service
 
 说明：
 
-- PDF 解析依赖系统命令 `pdftotext`，需要安装 `poppler-utils`。
-- DOCX 解析依赖 `unzip`，读取 `word/document.xml`。
-- TXT / MD 直接按 UTF-8 文本读取。
-- 旧版 `.doc` 使用保底文本提取，复杂文档可能需要先转成 DOCX/TXT。
+- PDF 解析依赖 `pdftotext`。
+- DOCX 解析依赖 `unzip`。
+- TXT / MD 按 UTF-8 文本读取。
+- 旧版 DOC 使用保底文本提取，复杂文档建议先转换为 DOCX 或 TXT。
 
-## 自动生成策略
+## 自动生成
 
-自动生成支持三类范围：
+自动生成可以选择：
 
 - 全剧
 - 前 N 集
 - 指定集数
 
-支持生成到：
+目标阶段可以选择：
 
 - 分镜
 - 镜头图片
 - 视频生成
-- 最终合成
+- 视频与语音合成
 
-如果检测到已有资产，系统会弹窗确认：
+当系统检测到已有资产时，会先弹窗确认：
 
-- 默认：继续补缺，只生成缺失部分。
-- 可选：重置并重新生成，只影响本次选择范围内的资产。
+- 默认选择继续补缺，只生成缺失内容。
+- 只有明确选择重新生成时，才会重置本次范围内的相关资产。
 
-角色库属于跨集复用资产，不会因为某一集重新生成而自动清空。
+角色库属于跨集复用资产，不会因为某一集重新生成而被自动清空。
 
-## 不应提交的内容
+## 数据与安全
 
-`.gitignore` 已忽略：
+仓库只保存源码、配置模板和提示词模板。以下内容不应提交：
 
-- `node_modules/`
-- `.venv/`
-- `frontend/.nuxt/`
-- `frontend/.output/`
-- `configs/config.yaml`
-- `data/huobao_drama.db`
-- `data/static/`
-- `data/storage/`
-- `.env`
+- API Key
+- 数据库文件
+- 用户上传文件
+- 生成图片、音频、视频
+- 本地 `.env`
 - 私钥、证书、本地备份文件
 
 提交前建议检查：
 
 ```bash
 git status --short
-git status --short --ignored
+git diff --stat
 ```
 
-不要提交：
+## 常用命令
 
-- API Key
-- 数据库
-- 用户上传文件
-- 生成图片/视频/音频
-- ComfyUI 私有工作流中包含的密钥
-
-## GitHub 备份建议
-
-建议在自己的 GitHub 创建一个私有仓库，然后把远端地址加为 `backup`：
+后端类型检查：
 
 ```bash
-git remote add origin git@github.com:nosee818/drama.git
-git push -u origin main
+cd backend
+npm run typecheck
 ```
 
-如果使用 HTTPS：
+前端构建：
 
 ```bash
-git remote add origin https://github.com/nosee818/drama.git
-git push -u origin main
+cd frontend
+npm run build
 ```
 
-首次推送前建议先检查将要提交的文件：
+查看当前 Git 状态：
 
 ```bash
 git status --short
-git diff --stat
 ```
 
 ## 许可证
 
-请以原项目许可证为准。本仓库为个人自定义备份版本。
+请根据实际使用场景补充许可证信息。
