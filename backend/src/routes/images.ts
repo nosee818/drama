@@ -74,7 +74,7 @@ app.post('/', async (c) => {
     configId = imageConfigForRequest(drama, body, configId)
     const id = await generateImage({
       storyboardId: body.storyboard_id,
-      dramaId: body.drama_id,
+      dramaId: body.drama_id || drama?.id,
       sceneId: body.scene_id,
       characterId: body.character_id,
       prompt: body.prompt,

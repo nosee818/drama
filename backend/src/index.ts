@@ -23,6 +23,8 @@ import skills from './routes/skills.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
+import { recoverProcessingImageGenerations } from './services/image-generation.js'
+import { recoverProcessingVideoGenerations } from './services/video-generation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -76,3 +78,8 @@ app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 const port = Number(process.env.PORT || 5679)
 console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
 serve({ fetch: app.fetch, port })
+
+setTimeout(() => {
+  recoverProcessingImageGenerations()
+  recoverProcessingVideoGenerations()
+}, 2000)

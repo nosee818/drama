@@ -9,14 +9,35 @@ import type {
   VideoGenerationRecord,
   VideoPollResponse,
   VideoProviderAdapter,
-} from './types'
-import { joinProviderUrl } from './url'
+  TTSProviderAdapter,
+} from './types.js'
+import { joinProviderUrl } from './url.js'
 
 function parseWorkflow(settings: Record<string, any>) {
   const workflow = settings.workflow || settings.workflowApi || settings.prompt
-  if (!workflow && Object.keys(settings).length > 0) return settings
+  if (!workflow && Object.keys(settings).length > 0) return pruneWorkflowMetadata(settings)
   if (!workflow) throw new Error('ComfyUI workflow JSON is required. Paste the workflow directly, or wrap it as settings.workflow')
-  return typeof workflow === 'string' ? JSON.parse(workflow) : workflow
+  return pruneWorkflowMetadata(typeof workflow === 'string' ? JSON.parse(workflow) : workflow)
+}
+
+function isComfyUINode(value: any) {
+  return value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof value.class_type === 'string'
+    && value.inputs
+    && typeof value.inputs === 'object'
+    && !Array.isArray(value.inputs)
+}
+
+function pruneWorkflowMetadata(workflow: any) {
+  if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) return workflow
+
+  const entries = Object.entries(workflow)
+  const hasNodeEntries = entries.some(([, value]) => isComfyUINode(value))
+  if (!hasNodeEntries) return workflow
+
+  return Object.fromEntries(entries.filter(([, value]) => isComfyUINode(value)))
 }
 
 function parseSize(size?: string | null) {
@@ -71,6 +92,19 @@ function pruneUnavailableLoadImageNodes(workflow: any) {
   return workflow
 }
 
+function applyOutputFilenamePrefix(workflow: any, prefix?: string | null) {
+  if (!prefix || !workflow || typeof workflow !== 'object' || Array.isArray(workflow)) return workflow
+
+  for (const node of Object.values(workflow) as any[]) {
+    if (!node?.inputs || typeof node.inputs !== 'object') continue
+    const classType = String(node.class_type || '').toLowerCase()
+    if (classType.includes('save') && Object.prototype.hasOwnProperty.call(node.inputs, 'filename_prefix')) {
+      node.inputs.filename_prefix = prefix
+    }
+  }
+  return workflow
+}
+
 function headers(config: AIConfig) {
   return {
     'Content-Type': 'application/json',
@@ -90,12 +124,22 @@ function isOutputFile(value: any) {
   return value && typeof value === 'object' && typeof value.filename === 'string'
 }
 
-function findOutputFile(result: any, serviceType: 'image' | 'video', config?: AIConfig) {
-  const historyEntry = Object.values(result || {}).find((entry: any) => entry?.outputs) as any
-  const outputs = result?.outputs || historyEntry?.outputs || {}
+function findHistoryOutputs(result: any, taskId?: string) {
+  if (!result || typeof result !== 'object') return {}
+  if (result.outputs) return result.outputs
+  if (taskId && result[taskId]?.outputs) return result[taskId].outputs
+  if (taskId) return {}
+  const historyEntry = Object.values(result).find((entry: any) => entry?.outputs) as any
+  return historyEntry?.outputs || {}
+}
+
+function findOutputFile(result: any, serviceType: 'image' | 'video' | 'audio', config?: AIConfig, taskId?: string) {
+  const outputs = findHistoryOutputs(result, taskId)
   const preferred = serviceType === 'image'
     ? ['images']
-    : ['videos', 'gifs', 'images']
+    : serviceType === 'audio'
+      ? ['audio', 'audios', 'files']
+      : ['videos', 'gifs', 'images']
   for (const output of Object.values(outputs) as any[]) {
     for (const key of preferred) {
       const files = output?.[key]
@@ -115,7 +159,8 @@ class ComfyUIBase {
   protected buildPromptRequest(config: AIConfig, values: Record<string, any>): ProviderRequest {
     this.currentConfig = config
     const settings = config.settings || {}
-    const workflow = pruneUnavailableLoadImageNodes(renderWorkflow(parseWorkflow(settings), values))
+    const outputPrefix = values.filename_prefix || values.filenamePrefix || `veryai-${values.task_id || Date.now()}`
+    const workflow = pruneUnavailableLoadImageNodes(applyOutputFilenamePrefix(renderWorkflow(parseWorkflow(settings), values), outputPrefix))
     return {
       url: joinProviderUrl(config.baseUrl, '', config.endpoint || settings.endpoint || '/prompt'),
       method: 'POST',
@@ -147,6 +192,7 @@ class ComfyUIBase {
 export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAdapter {
   async buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): Promise<ProviderRequest> {
     const { width, height } = parseSize(record.size)
+    const prompt = record.prompt || ''
     const referenceImages = (await Promise.all(
       parseReferenceImages(record.referenceImages).slice(0, 3).map((item) => uploadComfyUIImageIfNeeded(config, item)),
     )).filter((item): item is string => !!item)
@@ -156,7 +202,12 @@ export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAda
       ? (linkIds[name] ?? linkIds[String(index + 1)] ?? null)
       : null
     return this.buildPromptRequest(config, {
-      prompt: record.prompt || '',
+      prompt,
+      text: prompt,
+      input: prompt,
+      positive: prompt,
+      positive_prompt: prompt,
+      image_prompt: prompt,
       negative_prompt: '',
       model: record.model || config.model,
       width,
@@ -174,6 +225,8 @@ export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAda
       has_image1: !!referenceImages[0],
       has_image2: !!referenceImages[1],
       has_image3: !!referenceImages[2],
+      task_id: record.id,
+      filename_prefix: `veryai-image-${record.id || Date.now()}`,
     })
   }
 
@@ -185,14 +238,14 @@ export class ComfyUIImageAdapter extends ComfyUIBase implements ImageProviderAda
     return this.buildHistoryRequest(config, taskId)
   }
 
-  parsePollResponse(result: any): ImagePollResponse {
-    const url = findOutputFile(result, 'image', this.currentConfig || undefined) as string | null
+  parsePollResponse(result: any, config?: AIConfig, taskId?: string): ImagePollResponse {
+    const url = findOutputFile(result, 'image', config || this.currentConfig || undefined, taskId) as string | null
     if (url) return { status: 'completed', imageUrl: url }
     return { status: 'processing' }
   }
 
-  extractImageUrl(result: any): string | null {
-    return findOutputFile(result, 'image', this.currentConfig || undefined) as string | null
+  extractImageUrl(result: any, config?: AIConfig, taskId?: string): string | null {
+    return findOutputFile(result, 'image', config || this.currentConfig || undefined, taskId) as string | null
   }
 
   extractImageBase64(): { data: string; mimeType: string } | null {
@@ -240,6 +293,50 @@ async function uploadComfyUIImageIfNeeded(config: AIConfig, value: string | null
   return result.name || result.filename || filename
 }
 
+async function uploadComfyUIAudioIfNeeded(config: AIConfig, value: string | null): Promise<string | null> {
+  if (!value) return null
+  if (!value.startsWith('data:audio/')) return value
+
+  const match = value.match(/^data:(audio\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+  if (!match) return value
+
+  const mimeType = match[1]
+  const ext = mimeType.includes('flac') ? 'flac'
+    : mimeType.includes('wav') ? 'wav'
+      : mimeType.includes('ogg') ? 'ogg'
+        : mimeType.includes('mp4') ? 'm4a'
+          : 'mp3'
+  const bytes = Uint8Array.from(Buffer.from(match[2], 'base64'))
+  const blob = new Blob([bytes], { type: mimeType })
+  const filename = `veryai-voice-${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`
+  const attempts = [
+    { path: '/upload/audio', field: 'audio' },
+    { path: '/upload/image', field: 'image' },
+  ]
+
+  let lastError = ''
+  for (const attempt of attempts) {
+    const form = new FormData()
+    form.append(attempt.field, blob, filename)
+    form.append('overwrite', 'true')
+    form.append('type', 'input')
+
+    const resp = await fetch(joinProviderUrl(config.baseUrl, '', attempt.path), {
+      method: 'POST',
+      headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
+      body: form,
+      signal: AbortSignal.timeout(120_000),
+    })
+    if (resp.ok) {
+      const result = await resp.json().catch(() => null) as any
+      return result?.name || result?.filename || filename
+    }
+    lastError = `${resp.status}: ${await resp.text().catch(() => '')}`
+  }
+
+  throw new Error(`ComfyUI audio upload failed ${lastError}`)
+}
+
 export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAdapter {
   buildGenerateRequest(config: AIConfig, record: VideoGenerationRecord): ProviderRequest {
     const settings = config.settings || {}
@@ -273,6 +370,8 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
       aspect_ratio: record.aspectRatio || '16:9',
       AspectRatio: record.aspectRatio || '16:9',
       seed: Math.floor(Math.random() * 2147483647),
+      task_id: record.id,
+      filename_prefix: `veryai-video-${record.id || Date.now()}`,
     })
   }
 
@@ -284,13 +383,59 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
     return this.buildHistoryRequest(config, taskId)
   }
 
-  parsePollResponse(result: any): VideoPollResponse {
-    const url = findOutputFile(result, 'video', this.currentConfig || undefined) as string | null
+  parsePollResponse(result: any, config?: AIConfig, taskId?: string): VideoPollResponse {
+    const url = findOutputFile(result, 'video', config || this.currentConfig || undefined, taskId) as string | null
     if (url) return { status: 'completed', videoUrl: url }
     return { status: 'processing' }
   }
 
-  extractVideoUrl(result: any): string | null {
-    return findOutputFile(result, 'video', this.currentConfig || undefined) as string | null
+  extractVideoUrl(result: any, config?: AIConfig, taskId?: string): string | null {
+    return findOutputFile(result, 'video', config || this.currentConfig || undefined, taskId) as string | null
+  }
+}
+
+export class ComfyUITTSAdapter extends ComfyUIBase implements TTSProviderAdapter {
+  async buildGenerateRequest(config: AIConfig, params: any): Promise<ProviderRequest> {
+    const referenceAudio = await uploadComfyUIAudioIfNeeded(config, params.referenceAudioUrl || params.audio || params.voiceSampleUrl)
+    return this.buildPromptRequest(config, {
+      prompt: params.text || '',
+      text: params.text || '',
+      input: params.text || '',
+      voice: params.voice || '',
+      voice_id: params.voice || '',
+      instruct: params.instruct || params.voice || '',
+      ref_text: params.refText || params.referenceText || '',
+      target_text: params.text || '',
+      audio: referenceAudio || '',
+      ref_audio: referenceAudio || '',
+      reference_audio: referenceAudio || '',
+      voice_sample: referenceAudio || '',
+      model: params.model || config.model,
+      speed: params.speed ?? 1,
+      emotion: params.emotion || '',
+      seed: Math.floor(Math.random() * 2147483647),
+      task_id: params.id,
+      filename_prefix: `veryai-audio-${params.id || Date.now()}`,
+    })
+  }
+
+  parseResponse(result: any) {
+    return {
+      audioHex: '',
+      audioUrl: findOutputFile(result, 'audio', this.currentConfig || undefined) as string | null || undefined,
+      audioLength: 0,
+      sampleRate: 32000,
+      bitrate: 128000,
+      format: 'mp3',
+      channel: 1,
+    }
+  }
+
+  parseGenerateResponse(result: any) {
+    return this.parsePromptResponse(result)
+  }
+
+  buildPollRequest(config: AIConfig, taskId: string): ProviderRequest {
+    return this.buildHistoryRequest(config, taskId)
   }
 }

@@ -41,6 +41,160 @@ function getEpisodeCharacterIds(episodeId: number) {
   )
 }
 
+function extractDialogueSpeakers(dialogue?: string | null) {
+  if (!dialogue) return []
+  const speakers: string[] = []
+  for (const line of dialogue.split(/\n+/)) {
+    const match = line.trim().match(/^([^：:]{1,24})[：:]/)
+    if (!match) continue
+    const speaker = match[1]
+      .replace(/[（(].*?[）)]/g, '')
+      .replace(/[《》「」“”"'\s]/g, '')
+      .trim()
+    if (isValidDialogueSpeaker(speaker)) speakers.push(normalizeDialogueSpeakerName(speaker))
+  }
+  return [...new Set(speakers)]
+}
+
+function normalizeDialogueSpeakerName(name: string) {
+  const cleaned = name
+    .replace(/[（(].*?[）)]/g, '')
+    .replace(/[《》「」“”"'\s]/g, '')
+    .trim()
+  if (/系统|叮[！!]?|认同值|任务|绑定|抹杀/.test(cleaned)) return '系统音'
+  return cleaned
+}
+
+function isValidDialogueSpeaker(name: string) {
+  const cleaned = normalizeDialogueSpeakerName(name)
+  if (!cleaned) return false
+  if (cleaned === '系统音') return true
+  if (cleaned.length > 12) return false
+  if (/[，。！？!?；;]/.test(cleaned)) return false
+  return true
+}
+
+function shouldCreateVoiceOnlyCharacter(name: string) {
+  const normalized = name.trim().toLowerCase()
+  if (!normalized) return false
+  if (/^[\d\s]+$/.test(normalized)) return false
+  return true
+}
+
+function voiceOnlyStyleFor(name: string) {
+  if (/系统音|系统提示|电子提示/.test(name)) {
+    return '系统音，中性电子提示音，音调中等偏高，语速中等，吐字清晰，情绪克制，带有轻微科技感，适合系统绑定、任务提示和状态播报。'
+  }
+  if (/旁白|画外音|narrator|voiceover/i.test(name)) {
+    return `${name}，清晰自然的叙述声音，语速中等，情绪克制但有故事感，吐字清楚，适合短剧旁白、画外解说和剧情信息传达。`
+  }
+  if (/记者|新闻|播报|广播|主持/.test(name)) {
+    return `${name}，清晰稳重的播报声，吐字标准，语速中等偏稳，音色端正有职业感，适合新闻播报、现场报道或画外信息传达。`
+  }
+  if (/路人|群众|店员|服务员|保安|司机|护士|医生/.test(name)) {
+    return `${name}，自然生活化的配角声音，语速中等，吐字清楚，情绪贴合剧情但不过度夸张，适合短剧临场对白。`
+  }
+  return `${name}，符合角色身份和剧情用途的中文配音声音，吐字清楚，情绪自然，语速中等，适合短剧对白或画外音。`
+}
+
+function ensureVoiceOnlyCharacter(episodeId: number, dramaId: number, name: string, ts: string) {
+  if (!shouldCreateVoiceOnlyCharacter(name)) return null
+  const existing = db.select().from(schema.characters)
+    .where(eq(schema.characters.dramaId, dramaId)).all()
+    .find(c => !c.deletedAt && c.name === name)
+
+  const voiceRole = /系统音|系统提示|电子提示/.test(name)
+    ? '系统声音角色'
+    : (/旁白|画外音|narrator|voiceover/i.test(name)
+      ? '旁白声音角色'
+      : (/记者|新闻|播报|广播|主持/.test(name) ? '播报声音角色' : '声音角色'))
+  let characterId = existing?.id
+  if (existing) {
+    const updates: Record<string, any> = { updatedAt: ts }
+    if (!existing.voiceStyle) updates.voiceStyle = voiceOnlyStyleFor(name)
+    if (!existing.role) updates.role = voiceRole
+    if (!existing.appearance) updates.appearance = '仅声音角色，无需人物形象。'
+    if (Object.keys(updates).length > 1) {
+      db.update(schema.characters).set(updates).where(eq(schema.characters.id, existing.id)).run()
+    }
+  } else {
+    characterId = Number(db.insert(schema.characters).values({
+      dramaId,
+      name,
+      role: voiceRole,
+      description: `${name}，仅用于配音的声音角色。`,
+      appearance: '仅声音角色，无需人物形象。',
+      personality: '',
+      voiceStyle: voiceOnlyStyleFor(name),
+      voiceProvider: 'custom-design',
+      createdAt: ts,
+      updatedAt: ts,
+    }).run().lastInsertRowid)
+  }
+  if (!characterId) return null
+
+  const linked = db.select().from(schema.episodeCharacters)
+    .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
+    .some(link => link.characterId === characterId)
+  if (!linked) {
+    db.insert(schema.episodeCharacters).values({
+      episodeId,
+      characterId,
+      createdAt: ts,
+    }).run()
+  }
+  return characterId
+}
+
+function isSystemDialogue(raw: string, fields: Record<string, any>) {
+  const text = `${raw} ${fields.description || ''} ${fields.sound_effect || ''} ${fields.title || ''}`
+  return /叮[！!]?|系统提示|系统音|认同值|任务完成|任务：|绑定|抹杀/.test(text)
+}
+
+function stripSpeakerDecorations(value: string) {
+  return value.replace(/[（(].*?[）)]/g, '').trim()
+}
+
+function inferSpeakerFromDescription(description: string | undefined, characterNames: Set<string>) {
+  const text = description?.trim() || ''
+  if (!text) return ''
+  const match = text.match(/^([^：:\n]{1,16})(?:[（(][^）)]{1,12}[）)])?[：:]/)
+  if (!match) return ''
+  const candidate = normalizeDialogueSpeakerName(stripSpeakerDecorations(match[1]))
+  if (characterNames.has(candidate) || /旁白|画外音|记者|播报|广播|系统音/.test(candidate)) return candidate
+  return ''
+}
+
+function normalizeStoryboardDialogue(sb: Record<string, any>, characterById: Map<number, any>, characterNames: Set<string>) {
+  const raw = String(sb.dialogue || '').trim()
+  if (!raw) return ''
+
+  if (isSystemDialogue(raw, sb)) {
+    return raw.startsWith('系统音：') || raw.startsWith('系统音:')
+      ? raw
+      : `系统音：${raw.replace(/^系统音[：:]\s*/, '').trim()}`
+  }
+
+  const explicit = raw.match(/^([^：:\n]{1,24})[：:]\s*(.+)$/s)
+  if (explicit) {
+    const speaker = normalizeDialogueSpeakerName(stripSpeakerDecorations(explicit[1]))
+    if (isValidDialogueSpeaker(speaker)) return `${speaker}：${explicit[2].trim()}`
+  }
+
+  const byDescription = inferSpeakerFromDescription(sb.description, characterNames)
+  if (byDescription) return `${byDescription}：${raw.replace(/^（.+?）\s*/, '').trim()}`
+
+  const boundCharacters = (sb.character_ids || [])
+    .map((id: number) => characterById.get(Number(id)))
+    .filter(Boolean)
+    .filter((char: any) => !/旁白|画外音|声音角色|系统音/.test(`${char.name || ''} ${char.role || ''}`))
+  if (boundCharacters.length === 1) {
+    return `${boundCharacters[0].name}：${raw.replace(/^（.+?）\s*/, '').trim()}`
+  }
+
+  return raw
+}
+
 function validateStoryboardBindings(episodeId: number, sceneId: number | null | undefined, characterIds: number[] | undefined) {
   const episodeSceneIds = getEpisodeSceneIds(episodeId)
   const episodeCharacterIds = getEpisodeCharacterIds(episodeId)
@@ -172,12 +326,13 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       })),
     }),
     execute: async ({ storyboards }) => {
+      const storyboardRows = storyboards as Array<any>
       const ts = now()
       logTaskProgress('StoryboardTool', 'save-begin', {
         episodeId,
         dramaId,
-        count: storyboards.length,
-        shotNumbers: storyboards.map(sb => sb.shot_number).join(','),
+        count: storyboardRows.length,
+        shotNumbers: storyboardRows.map((sb: any) => sb.shot_number).join(','),
       })
       const existingStoryboardIds = db.select().from(schema.storyboards)
         .where(eq(schema.storyboards.episodeId, episodeId)).all()
@@ -189,8 +344,23 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       }
       db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
 
+      const allCharacters = db.select().from(schema.characters)
+        .where(eq(schema.characters.dramaId, dramaId)).all()
+        .filter(c => !c.deletedAt)
+      const characterById = new Map(allCharacters.map(c => [c.id, c]))
+      const characterNames = new Set(allCharacters.map(c => c.name))
+      const normalizedRows = storyboardRows.map((sb: any) => ({
+        ...sb,
+        dialogue: normalizeStoryboardDialogue(sb, characterById, characterNames) || undefined,
+      }))
+
+      const voiceOnlyNames = [...new Set(normalizedRows.flatMap((sb: any) => extractDialogueSpeakers(sb.dialogue)))] as string[]
+      for (const name of voiceOnlyNames) {
+        ensureVoiceOnlyCharacter(episodeId, dramaId, name, ts)
+      }
+
       let totalDuration = 0
-      for (const sb of storyboards) {
+      for (const sb of normalizedRows) {
         validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
         const res = db.insert(schema.storyboards).values({
           episodeId,

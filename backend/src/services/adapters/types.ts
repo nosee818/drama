@@ -27,13 +27,13 @@ export interface ImageProviderAdapter {
   /**
    * 解析轮询响应
    */
-  parsePollResponse(result: any): ImagePollResponse
+  parsePollResponse(result: any, config?: AIConfig, taskId?: string): ImagePollResponse
 
   /**
    * 从响应中提取图片 URL（用于直接下载）
    * 返回 null 表示图片数据是 base64 格式，需要用 extractImageBase64 处理
    */
-  extractImageUrl(result: any): string | null
+  extractImageUrl(result: any, config?: AIConfig, taskId?: string): string | null
 
   /**
    * 从响应中提取 base64 图片数据
@@ -54,9 +54,9 @@ export interface VideoProviderAdapter {
 
   buildPollRequest(config: AIConfig, taskId: string): ProviderRequest
 
-  parsePollResponse(result: any): VideoPollResponse
+  parsePollResponse(result: any, config?: AIConfig, taskId?: string): VideoPollResponse
 
-  extractVideoUrl(result: any): string | null
+  extractVideoUrl(result: any, config?: AIConfig, taskId?: string): string | null
 }
 
 // ============ 通用类型 ============
@@ -146,10 +146,40 @@ export interface VideoPollResponse {
 export interface TTSProviderAdapter {
   provider: string
 
-  buildGenerateRequest(config: AIConfig, params: any): ProviderRequest
+  buildGenerateRequest(config: AIConfig, params: any): ProviderRequest | Promise<ProviderRequest>
+
+  parseGenerateResponse?(result: any): {
+    isAsync: boolean
+    taskId?: string
+    audioHex?: string
+    audioBase64?: string
+    audioUrl?: string
+    audioLength?: number
+    sampleRate?: number
+    bitrate?: number
+    format?: string
+    channel?: number
+  }
+
+  buildPollRequest?(config: AIConfig, taskId: string): ProviderRequest
+
+  parsePollResponse?(result: any): {
+    status: 'pending' | 'processing' | 'completed' | 'failed'
+    audioHex?: string
+    audioBase64?: string
+    audioUrl?: string
+    audioLength?: number
+    sampleRate?: number
+    bitrate?: number
+    format?: string
+    channel?: number
+    error?: string
+  }
 
   parseResponse(result: any): {
     audioHex: string
+    audioBase64?: string
+    audioUrl?: string
     audioLength: number
     sampleRate: number
     bitrate: number

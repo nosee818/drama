@@ -1,5 +1,5 @@
 /**
- * FFmpeg 单镜头合成 — 视频 + TTS音频 + 烧录字幕
+ * FFmpeg 单镜头合成 — 视频 + 可选原声 + TTS音频 + 烧录字幕
  */
 import ffmpeg from 'fluent-ffmpeg'
 import fs from 'fs'
@@ -10,7 +10,7 @@ import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
-import { generateTTS } from './tts-generation.js'
+import { generateTTS, voiceSampleText } from './tts-generation.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -19,6 +19,10 @@ const DATA_ROOT = path.resolve(__dirname, '../../../data')
 let subtitleFilterSupport: boolean | null = null
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
+
+type ComposeOptions = {
+  keepOriginalAudio?: boolean
+}
 
 function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
@@ -60,9 +64,10 @@ function parseDialogueForTTS(dialogue?: string | null) {
 }
 
 /**
- * 合成单个镜头：视频 + TTS对白音频 + 烧录字幕
+ * 合成单个镜头：原视频画面 + TTS对白音频 + 烧录字幕。
+ * 默认不保留原视频自带声音；开启 keepOriginalAudio 时，有 TTS 会混音，无对白镜头会保留原声。
  */
-export async function composeStoryboard(storyboardId: number): Promise<string> {
+export async function composeStoryboard(storyboardId: number, options: ComposeOptions = {}): Promise<string> {
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
   if (!sb) throw new Error(`Storyboard ${storyboardId} not found`)
   if (!sb.videoUrl) throw new Error(`Storyboard ${storyboardId} has no video`)
@@ -94,6 +99,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
       if (!audioPath) {
         let voiceId = 'alloy'
+        let speakerCharacter: any = null
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
         if (parsedDialogue.speaker) {
           const charName = parsedDialogue.speaker
@@ -101,6 +107,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
             const chars = db.select().from(schema.characters)
               .where(eq(schema.characters.dramaId, ep.dramaId)).all()
             const found = chars.find(c => c.name === charName)
+            if (found) speakerCharacter = found
             if (found?.voiceStyle) voiceId = found.voiceStyle
           }
         }
@@ -109,17 +116,30 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
         if (pureDialogue) {
           logTaskProgress('ComposeTask', 'generate-inline-tts', { storyboardId, voiceId, textPreview: pureDialogue.slice(0, 40) })
           try {
-            const ttsPath = await generateTTS({ text: pureDialogue, voice: voiceId, configId: ep?.audioConfigId ?? undefined })
+            const ttsPath = await generateTTS({
+              text: pureDialogue,
+              voice: voiceId,
+              purpose: speakerCharacter?.voiceSampleUrl ? 'clone' : undefined,
+              instruct: speakerCharacter?.voiceStyle || voiceId,
+              refText: speakerCharacter ? voiceSampleText(speakerCharacter.name) : undefined,
+              referenceAudioUrl: speakerCharacter?.voiceSampleUrl || null,
+              configId: ep?.audioConfigId ?? undefined,
+            })
             audioPath = toAbsPath(ttsPath)
             db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
               .where(eq(schema.storyboards.id, storyboardId)).run()
           } catch (err: any) {
-            logTaskProgress('ComposeTask', 'inline-tts-skipped', {
+            logTaskError('ComposeTask', 'inline-tts-failed', {
               storyboardId,
               reason: err.message || 'TTS generation failed',
             })
+            throw new Error(`TTS generation failed: ${err.message || 'unknown error'}`)
           }
         }
+      }
+
+      if (!audioPath) {
+        throw new Error(`Storyboard ${storyboardId} has dialogue but no TTS audio was generated`)
       }
     }
 
@@ -145,8 +165,8 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
     fs.mkdirSync(outputDir, { recursive: true })
     const outputFilename = `${uuid()}.mp4`
     const outputPath = path.join(outputDir, outputFilename)
-
-    const sourceHasAudio = await hasAudioStream(videoPath)
+    const keepOriginalAudio = Boolean(options.keepOriginalAudio)
+    const sourceHasAudio = keepOriginalAudio ? await hasAudioStream(videoPath) : false
 
     await new Promise<void>((resolve, reject) => {
       let cmd = ffmpeg(videoPath)
@@ -177,12 +197,12 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
 
       const outputOptions = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
 
-      if (audioPath && sourceHasAudio) {
+      if (audioPath && keepOriginalAudio && sourceHasAudio) {
         cmd = cmd.complexFilter(['[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]'])
         outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-shortest')
       } else if (audioPath) {
         outputOptions.push('-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-shortest')
-      } else if (sourceHasAudio) {
+      } else if (keepOriginalAudio && sourceHasAudio) {
         outputOptions.push('-map', '0:v', '-map', '0:a?', '-c:a', 'aac', '-shortest')
       } else {
         outputOptions.push('-an')
@@ -203,6 +223,7 @@ export async function composeStoryboard(storyboardId: number): Promise<string> {
       storyboardId,
       storyboardNumber: sb.storyboardNumber,
       output: composedRelative,
+      keepOriginalAudio,
     })
     return composedRelative
   } catch (err) {

@@ -27,12 +27,17 @@
           </div>
         </div>
       </div>
-      <button class="btn btn-primary" @click="openAddEpisode">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        添加集
-      </button>
+      <div class="head-actions">
+        <button class="btn btn-ghost danger-btn" :disabled="clearingGenerated" @click="clearGeneratedDialog = true">
+          全部清除
+        </button>
+        <button class="btn btn-primary" @click="openAddEpisode">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          添加集
+        </button>
+      </div>
     </div>
 
     <section class="defaults-panel">
@@ -77,9 +82,14 @@
           <BaseSelect v-model="defaultShotImageConfigId" :options="imageConfigOptions" placeholder="选择镜头图片服务" searchable />
         </label>
         <label class="default-card">
-          <span class="config-card-kicker">AUDIO</span>
-          <span class="field-label">TTS / 音频模型</span>
-          <BaseSelect v-model="defaultAudioConfigId" :options="audioConfigOptions" placeholder="选择音频服务" searchable />
+          <span class="config-card-kicker">AUDIO DESIGN</span>
+          <span class="field-label">音色设计 TTS</span>
+          <BaseSelect v-model="defaultAudioDesignConfigId" :options="audioDesignConfigOptions" placeholder="选择音色设计服务" searchable />
+        </label>
+        <label class="default-card">
+          <span class="config-card-kicker">AUDIO CLONE</span>
+          <span class="field-label">配音克隆 TTS</span>
+          <BaseSelect v-model="defaultAudioCloneConfigId" :options="audioCloneConfigOptions" placeholder="选择配音克隆服务" searchable />
         </label>
         <label class="default-card">
           <span class="config-card-kicker">VIDEO</span>
@@ -107,6 +117,7 @@
           </button>
           <BaseSelect v-model="autoTarget" :options="autoTargetOptions" placeholder="选择目标阶段" style="width:220px" />
           <BaseSelect v-model="autoRangeMode" :options="autoRangeOptions" placeholder="选择范围" style="width:150px" />
+          <BaseSelect v-model="autoConcurrency" :options="autoConcurrencyOptions" placeholder="并行数" style="width:150px" />
           <label v-if="autoRangeMode === 'prefix'" class="auto-range-field">
             <span>前</span>
             <input v-model.number="autoEndEpisode" class="input auto-range-input" type="number" min="1" :max="drama.episodes?.length || 1" />
@@ -232,6 +243,36 @@
       </div>
     </div>
 
+    <div v-if="clearGeneratedDialog" class="dialog-mask">
+      <div class="card dialog clear-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <div class="dialog-kicker">Danger Zone</div>
+            <div class="dialog-title-row">
+              <div class="dialog-title">全部清除生成内容</div>
+              <span class="dialog-badge danger-badge">不可撤销</span>
+            </div>
+            <div class="dialog-sub">会取消当前自动生成任务，并清除本项目已经生成的 AI 改写、角色、场景、分镜、图片、视频、配音和合成记录；项目、集数和原始剧本会保留。</div>
+          </div>
+          <button class="back-btn" :disabled="clearingGenerated" @click="clearGeneratedDialog = false">取消</button>
+        </div>
+        <div class="dialog-section">
+          <div class="clear-warning">
+            用于测试自动生成流程时一键回到“只有项目和原始剧本”的状态。已经生成的资产记录会从当前项目中移除，后续需要重新生成。
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <div class="dialog-foot-copy">确认后会立即执行，正在运行的后台自动任务也会被标记为取消。</div>
+          <div class="dialog-actions">
+            <button class="btn btn-ghost" :disabled="clearingGenerated" @click="clearGeneratedDialog = false">取消</button>
+            <button class="btn btn-ghost danger-solid-btn" :disabled="clearingGenerated" @click="clearGeneratedAssets">
+              {{ clearingGenerated ? '清除中...' : '确认全部清除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <section v-if="characterLibrary.length" class="library-panel">
       <div class="library-head">
         <div>
@@ -270,14 +311,20 @@
               <span>{{ char.episode_count || 0 }} 集出现</span>
               <span v-if="char.image_url || char.imageUrl">已有人物图</span>
               <span v-else>待制作形象</span>
+              <span v-if="char.voice_style || char.voiceStyle">已设计声音</span>
+              <span v-if="char.voice_sample_url || char.voiceSampleUrl">有声音样本</span>
             </div>
             <div class="character-actions">
               <button class="btn btn-ghost btn-xs" @click="openCharacterEditor(char)">编辑</button>
               <button class="btn btn-ghost btn-xs" @click="openCharacterHistory(char)">历史</button>
               <button class="btn btn-ghost btn-xs" @click="openCharacterUpload(char)">上传</button>
+              <button class="btn btn-ghost btn-xs" @click="openCharacterVoiceUpload(char)">上传声音</button>
               <button class="btn btn-primary btn-xs" :disabled="isPendingCharacterImage(char.id)" @click="regenerateCharacterImage(char)">
                 {{ isPendingCharacterImage(char.id) ? '生成中' : '重新生成' }}
               </button>
+            </div>
+            <div v-if="char.voice_sample_url || char.voiceSampleUrl" class="character-voice-player">
+              <audio :src="assetUrl(char.voice_sample_url || char.voiceSampleUrl)" controls preload="none" />
             </div>
           </div>
         </article>
@@ -325,8 +372,8 @@
               <textarea v-model="characterForm.description" class="textarea" rows="3" placeholder="补充人物背景和重要设定" />
             </label>
             <label class="field">
-              <span class="field-label">音色</span>
-              <input v-model="characterForm.voice_style" class="input" placeholder="可选，例如：沉稳男声、清冷女声" />
+              <span class="field-label">声音设计提示词</span>
+              <textarea v-model="characterForm.voice_style" class="textarea" rows="3" placeholder="例如：30岁左右温柔知性的女性声音，语调平和，语速中等，适合职场对白。" />
             </label>
           </div>
         </div>
@@ -411,6 +458,7 @@
     </div>
 
     <input ref="characterUploadInput" type="file" accept="image/*" class="hidden-file-input" @change="handleCharacterUpload" />
+    <input ref="voiceSampleUploadInput" type="file" accept="audio/*" class="hidden-file-input" @change="handleVoiceSampleUpload" />
 
     <!-- Episode List -->
     <div class="section-label">
@@ -511,8 +559,8 @@
               </label>
               <label class="config-card">
                 <span class="config-card-kicker">AUDIO</span>
-                <span class="field-label">音频配置</span>
-                <BaseSelect v-model="newEpisodeAudioConfigId" :options="audioConfigOptions" placeholder="选择音频服务" searchable />
+                <span class="field-label">配音克隆配置</span>
+                <BaseSelect v-model="newEpisodeAudioConfigId" :options="audioCloneConfigOptions" placeholder="选择配音克隆服务" searchable />
               </label>
             </div>
           </div>
@@ -542,11 +590,14 @@ const autoTarget = ref('storyboard')
 const autoRangeMode = ref('all')
 const autoEndEpisode = ref(null)
 const selectedAutoEpisodes = ref([])
+const autoConcurrency = ref('auto')
 const autoJob = ref(null)
 const autoJobs = ref([])
 const autoPollJobIds = ref([])
 const autoRunning = computed(() => autoJobs.value.some(job => job.status === 'running'))
 const taskLogDialog = ref(false)
+const clearGeneratedDialog = ref(false)
+const clearingGenerated = ref(false)
 const autoConfirmDialog = ref(false)
 const autoPreview = ref(null)
 const pendingAutoPayload = ref(null)
@@ -565,7 +616,9 @@ const historyIndex = ref(0)
 const loadingCharacterHistory = ref(false)
 const selectingHistoryImage = ref(false)
 const characterUploadInput = ref(null)
+const voiceSampleUploadInput = ref(null)
 const uploadCharacter = ref(null)
+const uploadVoiceCharacter = ref(null)
 const characterForm = ref({
   name: '',
   role: '',
@@ -586,6 +639,8 @@ const defaultSceneImageConfigId = ref(null)
 const defaultShotImageConfigId = ref(null)
 const defaultVideoConfigId = ref(null)
 const defaultAudioConfigId = ref(null)
+const defaultAudioDesignConfigId = ref(null)
+const defaultAudioCloneConfigId = ref(null)
 const projectOrientationForm = ref('portrait')
 const newEpisodeImageConfigId = ref(null)
 const newEpisodeVideoConfigId = ref(null)
@@ -600,6 +655,15 @@ const autoRangeOptions = [
   { label: '全剧', value: 'all' },
   { label: '前 N 集', value: 'prefix' },
   { label: '指定集数', value: 'custom' },
+]
+const autoConcurrencyOptions = [
+  { label: '自动并行', value: 'auto' },
+  { label: '1 路', value: 1 },
+  { label: '2 路', value: 2 },
+  { label: '3 路', value: 3 },
+  { label: '4 路', value: 4 },
+  { label: '6 路', value: 6 },
+  { label: '8 路', value: 8 },
 ]
 const orientationOptions = [
   { label: '竖屏 9:16', value: 'portrait' },
@@ -654,12 +718,38 @@ function configLabel(config) {
   return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
 }
 
+function configSettings(config) {
+  const settings = config?.settings
+  if (!settings) return {}
+  if (typeof settings === 'object') return settings
+  try { return JSON.parse(settings) || {} } catch { return {} }
+}
+
+function audioConfigPurpose(config) {
+  const settings = configSettings(config)
+  const purpose = String(settings.purpose || settings.ttsPurpose || settings.tts_purpose || '').toLowerCase()
+  const name = `${config?.name || ''} ${config?.model || ''}`.toLowerCase()
+  if (purpose.includes('design') || name.includes('design')) return 'design'
+  if (purpose.includes('clone') || name.includes('clone')) return 'clone'
+  return 'general'
+}
+
 const textConfigOptions = computed(() => textConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const imageConfigOptions = computed(() => imageConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const videoConfigOptions = computed(() => videoConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const audioConfigOptions = computed(() => audioConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const audioDesignConfigs = computed(() => {
+  const matched = audioConfigs.value.filter(c => audioConfigPurpose(c) === 'design')
+  return matched.length ? matched : audioConfigs.value
+})
+const audioCloneConfigs = computed(() => {
+  const matched = audioConfigs.value.filter(c => audioConfigPurpose(c) === 'clone')
+  return matched.length ? matched : audioConfigs.value
+})
+const audioDesignConfigOptions = computed(() => audioDesignConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
+const audioCloneConfigOptions = computed(() => audioCloneConfigs.value.map(c => ({ label: configLabel(c), value: c.id })))
 const canCreateEpisode = computed(() => !!(newEpisodeImageConfigId.value && newEpisodeVideoConfigId.value && newEpisodeAudioConfigId.value))
-const canSaveDefaults = computed(() => !!(projectOrientationForm.value || defaultTextConfigId.value || defaultImageConfigId.value || defaultCharacterImageConfigId.value || defaultSceneImageConfigId.value || defaultShotImageConfigId.value || defaultVideoConfigId.value || defaultAudioConfigId.value))
+const canSaveDefaults = computed(() => !!(projectOrientationForm.value || defaultTextConfigId.value || defaultImageConfigId.value || defaultCharacterImageConfigId.value || defaultSceneImageConfigId.value || defaultShotImageConfigId.value || defaultVideoConfigId.value || defaultAudioConfigId.value || defaultAudioDesignConfigId.value || defaultAudioCloneConfigId.value))
 const sortedEpisodes = computed(() => [...(drama.value?.episodes || [])].sort((a, b) => Number(a.episode_number || a.episodeNumber) - Number(b.episode_number || b.episodeNumber)))
 function jobProgress(job) {
   const total = Number(job?.totalEpisodes || 0)
@@ -805,6 +895,26 @@ async function handleCharacterUpload(event) {
   }
 }
 
+function openCharacterVoiceUpload(char) {
+  uploadVoiceCharacter.value = char
+  voiceSampleUploadInput.value?.click()
+}
+
+async function handleVoiceSampleUpload(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !uploadVoiceCharacter.value) return
+  try {
+    await characterAPI.uploadVoiceSample(uploadVoiceCharacter.value.id, file)
+    toast.success('角色声音样本已上传')
+    await load()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    uploadVoiceCharacter.value = null
+  }
+}
+
 function formatDate(value) {
   if (!value) return ''
   try {
@@ -933,13 +1043,15 @@ function applyProjectDefaultsToForm() {
   defaultSceneImageConfigId.value = defaults.scene_image_config_id || defaults.image_config_id || defaultSceneImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
   defaultShotImageConfigId.value = defaults.shot_image_config_id || defaults.image_config_id || defaultShotImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
   defaultVideoConfigId.value = defaults.video_config_id || defaultVideoConfigId.value || activeFirst(videoConfigs.value)?.id || null
-  defaultAudioConfigId.value = defaults.audio_config_id || defaultAudioConfigId.value || activeFirst(audioConfigs.value)?.id || null
+  defaultAudioDesignConfigId.value = defaults.audio_design_config_id || defaultAudioDesignConfigId.value || activeFirst(audioDesignConfigs.value)?.id || null
+  defaultAudioCloneConfigId.value = defaults.audio_clone_config_id || defaults.audio_config_id || defaultAudioCloneConfigId.value || activeFirst(audioCloneConfigs.value)?.id || null
+  defaultAudioConfigId.value = defaultAudioCloneConfigId.value || defaults.audio_config_id || defaultAudioConfigId.value || activeFirst(audioConfigs.value)?.id || null
 }
 
 function syncNewEpisodeDefaults() {
   newEpisodeImageConfigId.value = defaultShotImageConfigId.value || defaultImageConfigId.value || activeFirst(imageConfigs.value)?.id || null
   newEpisodeVideoConfigId.value = defaultVideoConfigId.value || activeFirst(videoConfigs.value)?.id || null
-  newEpisodeAudioConfigId.value = defaultAudioConfigId.value || activeFirst(audioConfigs.value)?.id || null
+  newEpisodeAudioConfigId.value = defaultAudioCloneConfigId.value || defaultAudioConfigId.value || activeFirst(audioCloneConfigs.value)?.id || activeFirst(audioConfigs.value)?.id || null
 }
 
 async function load() {
@@ -1011,7 +1123,9 @@ async function saveProjectDefaults() {
         scene_image_config_id: defaultSceneImageConfigId.value || null,
         shot_image_config_id: defaultShotImageConfigId.value || null,
         video_config_id: defaultVideoConfigId.value || null,
-        audio_config_id: defaultAudioConfigId.value || null,
+        audio_design_config_id: defaultAudioDesignConfigId.value || null,
+        audio_clone_config_id: defaultAudioCloneConfigId.value || defaultAudioConfigId.value || null,
+        audio_config_id: defaultAudioCloneConfigId.value || defaultAudioConfigId.value || null,
       },
     }
     await dramaAPI.update(dramaId, { metadata: JSON.stringify(metadata) })
@@ -1019,7 +1133,7 @@ async function saveProjectDefaults() {
     await Promise.all(episodes.map(ep => episodeAPI.update(ep.id, {
       image_config_id: defaultShotImageConfigId.value || defaultImageConfigId.value || ep.image_config_id || ep.imageConfigId,
       video_config_id: defaultVideoConfigId.value || ep.video_config_id || ep.videoConfigId,
-      audio_config_id: defaultAudioConfigId.value || ep.audio_config_id || ep.audioConfigId,
+      audio_config_id: defaultAudioCloneConfigId.value || defaultAudioConfigId.value || ep.audio_config_id || ep.audioConfigId,
     })))
     toast.success('默认模型已保存')
     await load()
@@ -1027,6 +1141,25 @@ async function saveProjectDefaults() {
     toast.error(e.message)
   } finally {
     savingDefaults.value = false
+  }
+}
+
+async function clearGeneratedAssets() {
+  try {
+    clearingGenerated.value = true
+    await dramaAPI.clearGenerated(dramaId)
+    autoPollJobIds.value = []
+    autoJobs.value = []
+    clearGeneratedDialog.value = false
+    autoConfirmDialog.value = false
+    autoPreview.value = null
+    pendingAutoPayload.value = null
+    toast.success('生成内容已清除')
+    await Promise.all([load(), restoreAutoGenerateJob()])
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    clearingGenerated.value = false
   }
 }
 
@@ -1040,6 +1173,7 @@ async function startAutoGenerate() {
       target: autoTarget.value,
       end_episode: autoRangeMode.value === 'prefix' ? (autoEndEpisode.value || null) : null,
       episode_numbers: autoRangeMode.value === 'custom' ? selectedAutoEpisodes.value : [],
+      concurrency: autoConcurrency.value === 'auto' ? null : Number(autoConcurrency.value),
     }
     pendingAutoPayload.value = payload
     const preview = await dramaAPI.autoGeneratePreview(dramaId, payload)
@@ -1061,6 +1195,7 @@ async function beginAutoGenerate(regenerateMode = 'missing') {
         target: autoTarget.value,
         end_episode: autoRangeMode.value === 'prefix' ? (autoEndEpisode.value || null) : null,
         episode_numbers: autoRangeMode.value === 'custom' ? selectedAutoEpisodes.value : [],
+        concurrency: autoConcurrency.value === 'auto' ? null : Number(autoConcurrency.value),
       }),
       regenerate_mode: regenerateMode,
     })
@@ -1126,6 +1261,7 @@ async function restartAutoJob(job) {
       target: job.target,
       end_episode: job.episodeNumbers?.length ? null : (job.endEpisode || null),
       episode_numbers: job.episodeNumbers || [],
+      concurrency: job.concurrency || (autoConcurrency.value === 'auto' ? null : Number(autoConcurrency.value)),
     }
     pendingAutoPayload.value = payload
     const preview = await dramaAPI.autoGeneratePreview(dramaId, payload)
@@ -1167,9 +1303,10 @@ function handleAddDialogKeydown(event) {
   if (event.key === 'Escape' && characterHistoryDialog.value) closeCharacterHistory()
   if (event.key === 'Escape' && autoConfirmDialog.value) autoConfirmDialog.value = false
   if (event.key === 'Escape' && taskLogDialog.value) taskLogDialog.value = false
+  if (event.key === 'Escape' && clearGeneratedDialog.value && !clearingGenerated.value) clearGeneratedDialog.value = false
 }
 
-watch([defaultImageConfigId, defaultShotImageConfigId, defaultVideoConfigId, defaultAudioConfigId], () => {
+watch([defaultImageConfigId, defaultShotImageConfigId, defaultVideoConfigId, defaultAudioConfigId, defaultAudioCloneConfigId], () => {
   if (!addDialog.value) return
   syncNewEpisodeDefaults()
 })
@@ -1204,6 +1341,13 @@ onBeforeUnmount(() => {
 }
 .head-left { display: flex; align-items: flex-start; gap: 12px; }
 .head-info { display: flex; flex-direction: column; gap: 8px; }
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
 .back-btn {
   display: flex; align-items: center; gap: 6px;
@@ -1476,6 +1620,33 @@ onBeforeUnmount(() => {
 .danger-btn {
   color: var(--danger);
 }
+.danger-solid-btn {
+  color: #fff;
+  border-color: var(--danger);
+  background: var(--danger);
+  box-shadow: 0 10px 24px rgba(210, 59, 59, 0.22);
+}
+.danger-solid-btn:hover {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+.danger-badge {
+  background: rgba(210, 59, 59, 0.12);
+  color: var(--danger);
+}
+.clear-dialog {
+  width: min(760px, 100%);
+}
+.clear-warning {
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(210, 59, 59, 0.18);
+  background: rgba(210, 59, 59, 0.07);
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.7;
+}
 .library-panel {
   max-width: 1120px;
   margin-bottom: 24px;
@@ -1593,6 +1764,14 @@ onBeforeUnmount(() => {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 2px;
+}
+.character-voice-player {
+  margin-top: 4px;
+}
+.character-voice-player audio {
+  display: block;
+  width: 100%;
+  height: 28px;
 }
 .btn-xs {
   min-height: 26px;

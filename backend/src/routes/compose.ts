@@ -8,19 +8,22 @@ import { toSnakeCase } from '../utils/transform.js'
 
 const app = new Hono()
 
+async function readComposeOptions(c: any) {
+  const body = await c.req.json().catch(() => ({}))
+  return { keepOriginalAudio: Boolean(body?.keep_original_audio ?? body?.keepOriginalAudio) }
+}
+
 // POST /storyboards/:id/compose — 视频配音合成单个镜头
 app.post('/storyboards/:id/compose', async (c) => {
   const id = Number(c.req.param('id'))
   try {
+    const options = await readComposeOptions(c)
     const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
     if (!sb) return badRequest(c, 'Storyboard not found')
     if (!sb.videoUrl) return badRequest(c, 'Storyboard has no video')
-    if (!sb.ttsAudioUrl) {
-      return success(c, { id, skipped: true, reason: 'No TTS audio; use original video directly', video_url: sb.videoUrl })
-    }
-    logTaskStart('ComposeAPI', 'single-compose', { storyboardId: id })
-    const composedUrl = await composeStoryboard(id)
-    logTaskSuccess('ComposeAPI', 'single-compose', { storyboardId: id, output: composedUrl })
+    logTaskStart('ComposeAPI', 'single-compose', { storyboardId: id, keepOriginalAudio: options.keepOriginalAudio })
+    const composedUrl = await composeStoryboard(id, options)
+    logTaskSuccess('ComposeAPI', 'single-compose', { storyboardId: id, output: composedUrl, keepOriginalAudio: options.keepOriginalAudio })
     return success(c, { id, composed_video_url: composedUrl })
   } catch (err: any) {
     logTaskError('ComposeAPI', 'single-compose', { storyboardId: id, error: err.message })
@@ -28,9 +31,10 @@ app.post('/storyboards/:id/compose', async (c) => {
   }
 })
 
-// POST /episodes/:id/compose-all — 批量视频配音合成全部有配音镜头
+// POST /episodes/:id/compose-all — 批量视频配音合成全部镜头
 app.post('/episodes/:id/compose-all', async (c) => {
   const episodeId = Number(c.req.param('id'))
+  const options = await readComposeOptions(c)
   const storyboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -40,18 +44,9 @@ app.post('/episodes/:id/compose-all', async (c) => {
 
   const withVideo = storyboards.filter(sb => sb.videoUrl)
   if (withVideo.length === 0) return badRequest(c, 'No storyboards have video yet')
-  const withVoice = withVideo.filter(sb => !!sb.ttsAudioUrl)
-  if (withVoice.length === 0) {
-    logTaskSuccess('ComposeAPI', 'batch-compose-skipped', { episodeId, total: withVideo.length, skipped: withVideo.length })
-    return success(c, {
-      message: `Skipped voice compose: no TTS audio found. ${withVideo.length} original videos can be merged directly.`,
-      total: 0,
-      skipped: withVideo.length,
-    })
-  }
 
   // 异步处理
-  for (const sb of withVoice) {
+  for (const sb of withVideo) {
     db.update(schema.storyboards)
       .set({ status: 'compose_processing' })
       .where(eq(schema.storyboards.id, sb.id))
@@ -59,21 +54,22 @@ app.post('/episodes/:id/compose-all', async (c) => {
   }
 
   ;(async () => {
-    for (const sb of withVoice) {
+    for (const sb of withVideo) {
       try {
-        await composeStoryboard(sb.id)
+        await composeStoryboard(sb.id, options)
       } catch (err: any) {
         logTaskError('ComposeAPI', 'batch-item', { storyboardId: sb.id, episodeId, error: err.message })
       }
     }
-    logTaskSuccess('ComposeAPI', 'batch-compose', { episodeId, total: withVoice.length, skipped: withVideo.length - withVoice.length })
+    logTaskSuccess('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length, keepOriginalAudio: options.keepOriginalAudio })
   })()
 
-  logTaskStart('ComposeAPI', 'batch-compose', { episodeId, total: withVoice.length, skipped: withVideo.length - withVoice.length })
+  logTaskStart('ComposeAPI', 'batch-compose', { episodeId, total: withVideo.length, keepOriginalAudio: options.keepOriginalAudio })
   return success(c, {
-    message: `Started voice composing ${withVoice.length} storyboards; skipped ${withVideo.length - withVoice.length} without TTS`,
-    total: withVoice.length,
-    skipped: withVideo.length - withVoice.length,
+    message: `Started video and voice composing ${withVideo.length} storyboards`,
+    total: withVideo.length,
+    skipped: 0,
+    keep_original_audio: options.keepOriginalAudio,
   })
 })
 
@@ -86,24 +82,22 @@ app.get('/episodes/:id/compose-status', async (c) => {
     .all()
 
   const withVideo = storyboards.filter(sb => !!sb.videoUrl)
-  const withVoice = withVideo.filter(sb => !!sb.ttsAudioUrl)
-  const completed = withVoice.filter(sb => sb.status === 'compose_completed' && !!sb.composedVideoUrl)
+  const completed = withVideo.filter(sb => sb.status === 'compose_completed' && !!sb.composedVideoUrl)
   const failed = withVideo.filter(sb => sb.status === 'compose_failed')
   const processing = withVideo.filter(sb => sb.status === 'compose_processing')
-  const skipped = withVideo.filter(sb => !sb.ttsAudioUrl)
-  const idle = withVoice.filter(sb => !sb.status || !String(sb.status).startsWith('compose_'))
+  const idle = withVideo.filter(sb => !sb.status || !String(sb.status).startsWith('compose_'))
 
   return success(c, {
-    total: withVoice.length,
+    total: withVideo.length,
     completed: completed.length,
     failed: failed.length,
     processing: processing.length,
     idle: idle.length,
-    skipped: skipped.length,
+    skipped: 0,
     items: withVideo.map((sb) => toSnakeCase({
       id: sb.id,
       storyboardNumber: sb.storyboardNumber,
-      status: sb.ttsAudioUrl ? (sb.status || 'pending') : 'compose_skipped',
+      status: sb.status || 'pending',
       composedVideoUrl: sb.composedVideoUrl,
       errorMsg: sb.status === 'compose_failed' ? '视频配音合成失败，请检查视频、配音或字幕素材' : '',
     })),

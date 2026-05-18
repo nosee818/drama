@@ -11,7 +11,7 @@ import { downloadFile, readImageAsCompressedDataUrl, saveUploadedFile } from '..
 import { getVideoAdapter } from './adapters/registry'
 import { joinProviderUrl } from './adapters/url.js'
 import type { AIConfig, ProviderRequest } from './adapters/types'
-import { configForComfyUITask, encodeComfyUITaskId, isComfyUIProvider, selectComfyUIConfig } from './adapters/comfyui-lb'
+import { configForComfyUITask, encodeComfyUITaskId, isComfyUIProvider, reserveComfyUIConfig, retainComfyUIEndpoint, selectComfyUIConfig } from './adapters/comfyui-lb'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 const genericVideoCounters = new Map<string, number>()
@@ -151,6 +151,30 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     console.error(`Video generation ${lastId} failed:`, err)
   })
   return lastId
+}
+
+export function recoverProcessingVideoGenerations() {
+  const config = getActiveConfig('video')
+  if (!config || !isComfyUIProvider(config.provider)) return
+
+  const rows = db.select().from(schema.videoGenerations)
+    .where(eq(schema.videoGenerations.status, 'processing'))
+    .all()
+    .filter(row => isComfyUIProvider(row.provider || '') && String(row.taskId || '').startsWith('huobao-comfyui:'))
+
+  for (const row of rows) {
+    const pollTarget = configForComfyUITask(config, row.taskId!)
+    const release = retainComfyUIEndpoint(pollTarget.config.baseUrl)
+    logTaskProgress('VideoTask', 'recover-poll', {
+      id: row.id,
+      taskId: row.taskId,
+      provider: row.provider,
+      storyboardId: row.storyboardId,
+    })
+    pollVideoTask(row.id, config, row.taskId!, row.storyboardId, release).catch((err: any) => {
+      logTaskError('VideoTask', 'recover-poll', { id: row.id, error: err.message })
+    })
+  }
 }
 
 async function processVideoGeneration(id: number, config: AIConfig) {
@@ -378,12 +402,12 @@ function getVideoServerQueueKey(config: AIConfig, urls: string[]) {
 
 async function acquireVideoServerSlot(config: AIConfig): Promise<VideoServerReservation> {
   if (isComfyUIProvider(config.provider)) {
-    const selected = selectComfyUIConfig(config)
+    const selected = reserveComfyUIConfig(config)
     return {
-      config: selected,
+      config: selected.config,
       key: 'comfyui',
       baseUrl: selected.baseUrl,
-      release: () => {},
+      release: selected.release,
     }
   }
 
@@ -528,50 +552,54 @@ async function uploadComfyUIImageIfNeeded(config: AIConfig, value: string | null
   return result.name || result.filename || filename
 }
 
-async function pollVideoTask(id: number, config: AIConfig, taskId: string, storyboardId?: number | null) {
+async function pollVideoTask(id: number, config: AIConfig, taskId: string, storyboardId?: number | null, release: () => void = () => {}) {
   const adapter = getVideoAdapter(config.provider)
   const pollTarget = isComfyUIProvider(config.provider)
     ? configForComfyUITask(config, taskId)
     : { config, taskId }
 
-  for (let i = 0; i < 300; i++) {
-    await new Promise(r => setTimeout(r, 10000))
-    try {
-      const { url, method, headers } = adapter.buildPollRequest(pollTarget.config, pollTarget.taskId)
-      logTaskProgress('VideoTask', 'poll-request', {
-        id,
-        taskId: pollTarget.taskId,
-        provider: config.provider,
-        method,
-        url: redactUrl(url),
-        attempt: i + 1,
-      })
-      const resp = await fetch(url, { method, headers })
-      if (!resp.ok) continue
-      const result = await resp.json() as any
+  try {
+    for (let i = 0; i < 300; i++) {
+      await new Promise(r => setTimeout(r, 10000))
+      try {
+        const { url, method, headers } = adapter.buildPollRequest(pollTarget.config, pollTarget.taskId)
+        logTaskProgress('VideoTask', 'poll-request', {
+          id,
+          taskId: pollTarget.taskId,
+          provider: config.provider,
+          method,
+          url: redactUrl(url),
+          attempt: i + 1,
+        })
+        const resp = await fetch(url, { method, headers })
+        if (!resp.ok) continue
+        const result = await resp.json() as any
 
-      const pollResp = adapter.parsePollResponse(result)
+        const pollResp = adapter.parsePollResponse(result, pollTarget.config, pollTarget.taskId)
 
-      if (pollResp.status === 'completed' && pollResp.videoUrl) {
-        logTaskSuccess('VideoTask', 'poll-complete', { id, taskId, videoUrl: pollResp.videoUrl })
-        await handleVideoComplete(id, pollResp.videoUrl, null, storyboardId)
-        return
+        if (pollResp.status === 'completed' && pollResp.videoUrl) {
+          logTaskSuccess('VideoTask', 'poll-complete', { id, taskId, videoUrl: pollResp.videoUrl })
+          await handleVideoComplete(id, pollResp.videoUrl, null, storyboardId)
+          return
+        }
+        if (pollResp.status === 'failed') {
+          logTaskError('VideoTask', 'poll-failed', { id, taskId, error: pollResp.error || 'Video generation failed' })
+          throw new Error(pollResp.error || 'Video generation failed')
+        }
+      } catch (err: any) {
+        if (i === 299) {
+          logTaskError('VideoTask', 'poll-timeout', { id, taskId, error: err.message })
+          db.update(schema.videoGenerations)
+            .set({ status: 'failed', errorMsg: `Timeout: ${err.message}`, updatedAt: now() })
+            .where(eq(schema.videoGenerations.id, id))
+            .run()
+          return
+        }
+        logTaskWarn('VideoTask', 'poll-retry', { id, taskId: pollTarget.taskId, attempt: i + 1, error: err.message })
       }
-      if (pollResp.status === 'failed') {
-        logTaskError('VideoTask', 'poll-failed', { id, taskId, error: pollResp.error || 'Video generation failed' })
-        throw new Error(pollResp.error || 'Video generation failed')
-      }
-    } catch (err: any) {
-      if (i === 299) {
-        logTaskError('VideoTask', 'poll-timeout', { id, taskId, error: err.message })
-        db.update(schema.videoGenerations)
-          .set({ status: 'failed', errorMsg: `Timeout: ${err.message}`, updatedAt: now() })
-          .where(eq(schema.videoGenerations.id, id))
-          .run()
-        return
-      }
-      logTaskWarn('VideoTask', 'poll-retry', { id, taskId: pollTarget.taskId, attempt: i + 1, error: err.message })
     }
+  } finally {
+    release()
   }
 }
 

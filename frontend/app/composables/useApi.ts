@@ -1,5 +1,17 @@
 const BASE = '/api/v1'
 
+async function parseJsonResponse(resp: Response) {
+  const text = await resp.text()
+  if (!text.trim()) {
+    throw new Error(resp.ok ? '服务返回为空，请检查后端服务状态' : `服务无响应或返回为空：${resp.status}`)
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`服务返回不是有效 JSON：${resp.status}`)
+  }
+}
+
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
   const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
   if (body) opts.body = JSON.stringify(body)
@@ -9,7 +21,7 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 
   try {
     const resp = await fetch(`${BASE}${path}`, opts)
-    const json = await resp.json()
+    const json = await parseJsonResponse(resp)
     const ms = Math.round(performance.now() - start)
 
     if (!resp.ok || (json.code && json.code >= 400)) {
@@ -34,7 +46,7 @@ async function uploadReq<T = any>(method: string, path: string, body: FormData):
 
   try {
     const resp = await fetch(`${BASE}${path}`, { method, body })
-    const json = await resp.json()
+    const json = await parseJsonResponse(resp)
     const ms = Math.round(performance.now() - start)
 
     if (!resp.ok || (json.code && json.code >= 400)) {
@@ -72,6 +84,7 @@ export const dramaAPI = {
   autoGenerateJobs: (id: number) => api.get(`/dramas/${id}/auto-generate-jobs`),
   autoGenerateStatus: (id: number, jobId: string) => api.get(`/dramas/${id}/auto-generate/${jobId}`),
   autoGenerateControl: (id: number, jobId: string, action: 'pause' | 'resume' | 'cancel') => api.post(`/dramas/${id}/auto-generate/${jobId}/control`, { action }),
+  clearGenerated: (id: number) => api.post(`/dramas/${id}/clear-generated`, { confirm: 'CLEAR' }),
   del: (id: number) => api.del(`/dramas/${id}`),
 }
 
@@ -87,13 +100,24 @@ export const episodeAPI = {
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
-  generateTTS: (id: number) => api.post(`/storyboards/${id}/generate-tts`),
+  generateTTS: (id: number, configId?: number | null) => api.post(`/storyboards/${id}/generate-tts`, { ...(configId ? { config_id: configId } : {}) }),
+  uploadFrame: (id: number, frameType: 'first_frame' | 'last_frame', file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('frame_type', frameType)
+    return uploadReq('POST', `/storyboards/${id}/upload-frame`, body)
+  },
+  uploadVideo: (id: number, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return uploadReq('POST', `/storyboards/${id}/upload-video`, body)
+  },
   del: (id: number) => api.del(`/storyboards/${id}`),
 }
 
 export const characterAPI = {
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
-  voiceSample: (id: number, episodeId: number) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId }),
+  voiceSample: (id: number, episodeId: number, configId?: number | null) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),
   generateImage: (id: number, episodeId?: number | null, configId?: number | null) => api.post(`/characters/${id}/generate-image`, { ...(episodeId ? { episode_id: episodeId } : {}), ...(configId ? { config_id: configId } : {}) }),
   batchImages: (ids: number[], episodeId: number, configId?: number | null) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),
   images: (id: number) => api.get(`/characters/${id}/images`),
@@ -103,11 +127,21 @@ export const characterAPI = {
     body.append('file', file)
     return uploadReq('POST', `/characters/${id}/upload-image`, body)
   },
+  uploadVoiceSample: (id: number, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return uploadReq('POST', `/characters/${id}/upload-voice-sample`, body)
+  },
 }
 
 export const sceneAPI = {
   update: (id: number, data: any) => api.put(`/scenes/${id}`, data),
   generateImage: (id: number, episodeId: number, configId?: number | null) => api.post(`/scenes/${id}/generate-image`, { episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),
+  uploadImage: (id: number, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return uploadReq('POST', `/scenes/${id}/upload-image`, body)
+  },
 }
 
 export const imageAPI = {
@@ -137,8 +171,8 @@ export const videoAPI = {
   },
 }
 export const composeAPI = {
-  shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),
-  all: (epId: number) => api.post(`/compose/episodes/${epId}/compose-all`),
+  shot: (id: number, options?: { keep_original_audio?: boolean; keepOriginalAudio?: boolean }) => api.post(`/compose/storyboards/${id}/compose`, options || {}),
+  all: (epId: number, options?: { keep_original_audio?: boolean; keepOriginalAudio?: boolean }) => api.post(`/compose/episodes/${epId}/compose-all`, options || {}),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
@@ -156,6 +190,8 @@ export const aiConfigAPI = {
 
 export const agentConfigAPI = {
   list: () => api.get('/agent-configs'),
+  stylePrompts: () => api.get('/agent-configs/style-prompts'),
+  saveStylePrompts: (items: any[]) => api.put('/agent-configs/style-prompts', { items }),
   get: (id: number) => api.get(`/agent-configs/${id}`),
   create: (d: any) => api.post('/agent-configs', d),
   update: (id: number, d: any) => api.put(`/agent-configs/${id}`, d),
@@ -164,6 +200,8 @@ export const agentConfigAPI = {
 
 export const skillsAPI = {
   list: () => api.get('/skills'),
+  active: () => api.get('/skills/active'),
+  setActive: (agentType: string, skillId: string) => api.put(`/skills/active/${agentType}`, { skill_id: skillId }),
   get: (id: string) => api.get(`/skills/${id}`),
   create: (data: { id: string; name: string; description?: string }) => api.post('/skills', data),
   update: (id: string, content: string) => api.put(`/skills/${id}`, { content }),

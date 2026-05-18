@@ -184,6 +184,53 @@
         </div>
       </div>
 
+      <!-- ===== 风格提示词 ===== -->
+      <div v-else-if="tab === 'styles'" class="settings-scroll">
+        <div class="settings-head">
+          <div class="settings-brand">
+            <div class="settings-brand-mark">
+              <img v-if="showBrandImage" :src="brandLogo" alt="VeryAI短剧平台" class="settings-brand-logo" @error="showBrandImage = false" />
+              <span v-else class="settings-brand-fallback">V</span>
+            </div>
+            <div class="settings-brand-copy">
+              <div class="settings-brand-kicker">STYLE PROMPTS</div>
+              <div class="settings-brand-name">风格提示词</div>
+            </div>
+          </div>
+          <h2 class="settings-title">风格提示词</h2>
+          <p class="settings-desc">项目选择风格后，系统会把这里的提示词自动拼接到角色、场景和镜头图片提示词前面。</p>
+        </div>
+
+        <div class="style-prompt-list">
+          <div v-for="item in stylePromptItems" :key="item.key" class="card style-prompt-card">
+            <div class="style-prompt-head">
+              <div>
+                <div class="style-prompt-title">{{ item.label }}</div>
+                <div class="dim" style="font-size:12px">{{ item.key }}</div>
+              </div>
+              <span :class="['tag', item.prompt ? 'tag-success' : '']">{{ item.prompt ? '自动拼接' : '不拼接' }}</span>
+            </div>
+            <label class="field">
+              <span class="field-label">风格提示词</span>
+              <textarea
+                v-model="item.prompt"
+                class="textarea"
+                rows="5"
+                :placeholder="item.key === 'none' ? '留空表示不添加风格约束' : '输入后会自动拼接到图片提示词前面'"
+              />
+            </label>
+          </div>
+        </div>
+
+        <div class="style-prompt-actions">
+          <button class="btn btn-ghost btn-sm" @click="loadStylePrompts">重新加载</button>
+          <button class="btn btn-primary btn-sm" :disabled="stylePromptSaving" @click="saveStylePrompts">
+            <Loader2 v-if="stylePromptSaving" :size="12" class="animate-spin" />
+            保存风格提示词
+          </button>
+        </div>
+      </div>
+
       <!-- ===== Skills 编辑 ===== -->
       <div v-else-if="tab === 'skills'" class="skills-layout">
         <!-- Agent 左侧列表 -->
@@ -245,6 +292,8 @@
                   <div style="font-weight:600;font-size:13px">{{ s.name }}</div>
                   <div class="dim" style="font-size:11px">{{ s.description }}</div>
                 </div>
+                <span v-if="isActiveSkill(s.id)" class="tag tag-success">应用中</span>
+                <button v-else class="btn btn-ghost btn-sm" @click.stop="setActiveSkill(s.id)">设为应用</button>
                 <button class="btn btn-ghost btn-icon" style="margin-right:4px" @click.stop="deleteSkill(s.id)">
                   <Trash2 :size="13" />
                 </button>
@@ -259,10 +308,11 @@
                   placeholder="编写 SKILL.md 内容..."
                 />
                 <div class="skill-card-foot">
-                  <span class="dim" style="font-size:11px">skills/{{ selectedAgentType }}/{{ s.id }}/SKILL.md</span>
+                  <span class="dim" style="font-size:11px">skills/{{ s.id }}/SKILL.md</span>
                   <span v-if="skillSaved === s.id" class="tag tag-success" style="margin-left:8px">
                     <Check :size="10" /> 已保存
                   </span>
+                  <button v-if="!isActiveSkill(s.id)" class="btn btn-ghost btn-sm" @click="setActiveSkill(s.id)">设为应用</button>
                   <button class="btn btn-primary btn-sm ml-auto" :disabled="skillSaving" @click="saveSkill(s.id)">
                     <Loader2 v-if="skillSaving" :size="12" class="animate-spin" />
                     保存
@@ -358,8 +408,8 @@
         </div>
         <label class="field">
           <span class="field-label">高级 JSON 配置</span>
-          <textarea v-model="cfgForm.settingsStr" class="textarea mono" rows="8" placeholder='ComfyUI 示例：{"workflow": {"3": {"inputs": {"text": "{{prompt}}"}}}}；通用视频可填 {"requestTemplate": {"prompt": "{{prompt}}", "model": "{{model}}"}}' />
-          <span class="field-hint" v-pre>ComfyUI 使用 workflow 工作流 JSON，支持 {{prompt}}、{{model}}、{{width}}、{{height}}、{{seed}}、{{input_image}}、{{first_frame}}、{{last_frame}}、{{duration}} 等占位符。</span>
+          <textarea v-model="cfgForm.settingsStr" class="textarea mono" rows="8" :placeholder="settingsPlaceholder" />
+          <span class="field-hint">{{ settingsHint }}</span>
         </label>
         <div v-if="cfgTestResult" class="test-result" :class="{ ok: cfgTestResult.reachable, bad: !cfgTestResult.reachable }">
           <div class="test-result-head">
@@ -441,7 +491,7 @@
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Palette } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, agentConfigAPI, skillsAPI } from '~/composables/useApi'
@@ -455,6 +505,7 @@ const baseTabs = [
 ]
 const advancedTabs = [
   { id: 'agents', label: 'Agent 配置', icon: Bot },
+  { id: 'styles', label: '风格提示词', icon: Palette },
   { id: 'skills', label: 'Skills', icon: FileText },
 ]
 watch(showAdvanced, (v) => {
@@ -517,6 +568,35 @@ const providerPresets = {
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
+    custom: {
+      label: '通用任务 API',
+      baseUrl: 'https://api.example.com',
+      models: ['tts-model'],
+      endpoint: '/v1/audio/speech',
+      queryEndpoint: '/v1/audio/tasks/{taskId}',
+      settings: {
+        requestTemplate: {
+          model: '{{model}}',
+          input: '{{text}}',
+          voice: '{{voice}}',
+        },
+        responseType: 'file',
+        fileExtension: 'mp3',
+        timeoutMs: 600000,
+      },
+    },
+    comfyui: {
+      label: 'ComfyUI 工作流',
+      baseUrl: 'http://127.0.0.1:8188',
+      models: ['workflow'],
+      endpoint: '/prompt',
+      queryEndpoint: '/history/{taskId}',
+      settings: {
+        workflow: {},
+        timeoutMs: 600000,
+        pollIntervalMs: 3000,
+      },
+    },
   },
 }
 const huobaoPresetCards = [
@@ -550,6 +630,26 @@ const endpointHint = computed(() => {
   const prefix = endpointPrefixes[provider] || ''
   if (!provider) return '选择服务商后显示推荐端点前缀'
   return `${base}${cfgForm.endpoint || prefix}`
+})
+
+const settingsPlaceholder = computed(() => {
+  if (cfgForm.service_type === 'audio' && cfgForm.provider === 'comfyui') {
+    return '{"workflow": {"3": {"inputs": {"text": "{{text}}", "voice": "{{voice}}"}}}, "timeoutMs": 600000, "pollIntervalMs": 3000}'
+  }
+  if (cfgForm.service_type === 'audio') {
+    return '{"requestTemplate": {"model": "{{model}}", "input": "{{text}}", "voice": "{{voice}}"}, "responseType": "json", "fileExtension": "mp3", "timeoutMs": 600000, "pollIntervalMs": 3000}'
+  }
+  if (cfgForm.service_type === 'video') {
+    return 'ComfyUI 示例：{"workflow": {"3": {"inputs": {"text": "{{prompt}}"}}}}；通用视频可填 {"requestTemplate": {"prompt": "{{prompt}}", "model": "{{model}}"}}'
+  }
+  return '{"requestTemplate": {"prompt": "{{prompt}}", "model": "{{model}}"}}'
+})
+
+const settingsHint = computed(() => {
+  if (cfgForm.service_type === 'audio') {
+    return '音频支持 {{text}}、{{voice}}、{{model}}、{{speed}}、{{emotion}}。通用任务 API 可同步返回 file/json，也可返回 task_id 并按查询端点轮询；ComfyUI 使用 workflow 工作流 JSON 并从 history 输出中读取 audio/audios/files。'
+  }
+  return 'ComfyUI 使用 workflow 工作流 JSON，支持 {{prompt}}、{{model}}、{{width}}、{{height}}、{{seed}}、{{input_image}}、{{first_frame}}、{{last_frame}}、{{duration}} 等占位符。'
 })
 
 function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
@@ -732,7 +832,7 @@ const agentDefs = [
   { type: 'script_rewriter', label: '剧本改写', icon: '📝' },
   { type: 'extractor', label: '角色场景提取', icon: '🔍' },
   { type: 'storyboard_breaker', label: '分镜拆解', icon: '🎬' },
-  { type: 'voice_assigner', label: '音色分配', icon: '🎙' },
+  { type: 'voice_assigner', label: '声音设计', icon: '🎙' },
   { type: 'grid_prompt_generator', label: '图片提示词生成', icon: '🖼' },
 ]
 
@@ -780,15 +880,20 @@ const defaultPrompts = {
 2. 将剧本拆解为镜头序列（每个镜头 10-15 秒）
 3. 为每个镜头生成视频提示词（video_prompt）
 4. 调用 save_storyboards 保存所有分镜`,
-  voice_assigner: `你是配音导演，擅长为角色选择合适的音色。
+  voice_assigner: `你是配音导演，擅长根据短剧角色资料设计可用于 TTS 生成和声音克隆的角色声音提示词。
 
 工作流程：
-1. 调用 list_voices 获取可用音色列表
-2. 调用 get_characters 获取所有角色信息
-3. 根据每个角色的性别、性格、年龄、角色定位，选择最匹配的音色
-4. 对每个角色调用 assign_voice 分配音色，并说明选择理由
+1. 调用 get_characters 读取当前集角色资料和已有声音设定
+2. 调用 get_voice_design_guide 读取声音设计维度和示例
+3. 根据每个角色的身份、年龄感、性格、剧情定位和对白用途，生成具体中文声音提示词
+4. 对每个需要声音的角色调用 save_voice_design 保存声音设定，并说明设计理由
 
-注意：每个角色都必须分配音色，不要遗漏。`,
+注意：
+- 现在不是从现成音色库中选择 voice_id，而是为角色设计声音提示词
+- 提示词必须具体、可执行，避免“好听的声音”“像某明星的声音”等模糊或侵权描述
+- 不必机械填写所有维度，要根据角色资料选择有效维度
+- 如果角色已有合适的 current_voice_prompt，可以保留并说明无需修改
+- 每个有对白或重要旁白用途的角色都应有声音设计。`,
   grid_prompt_generator: `你是专业的 AI 图像提示词工程师，擅长为角色、场景和宫格图生成高质量的中文提示词。
 
 你将收到用户的请求，告知要生成哪种类型的提示词：
@@ -900,9 +1005,36 @@ async function saveAgentCfg(type) {
   }
 }
 
+// ===== Style Prompts =====
+const stylePromptItems = ref([])
+const stylePromptSaving = ref(false)
+
+async function loadStylePrompts() {
+  try {
+    const res = await agentConfigAPI.stylePrompts()
+    stylePromptItems.value = (res.items || []).map(item => ({ ...item }))
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function saveStylePrompts() {
+  stylePromptSaving.value = true
+  try {
+    const res = await agentConfigAPI.saveStylePrompts(stylePromptItems.value)
+    stylePromptItems.value = (res.items || []).map(item => ({ ...item }))
+    toast.success('风格提示词已保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    stylePromptSaving.value = false
+  }
+}
+
 // ===== Skills =====
 const selectedAgent = ref('script_rewriter')
 const allSkills = ref([])   // { id, name, description }[]
+const activeSkills = ref({})
 const editingSkill = ref(null)
 const skillContent = ref('')
 const skillSaving = ref(false)
@@ -923,13 +1055,38 @@ const currentSkills = computed(() =>
 )
 
 async function loadAllSkills() {
-  try { allSkills.value = await skillsAPI.list() }
+  try {
+    const [skills, active] = await Promise.all([
+      skillsAPI.list(),
+      skillsAPI.active(),
+    ])
+    allSkills.value = skills
+    activeSkills.value = active || {}
+  }
   catch (e) { toast.error(e.message) }
 }
 
 async function selectAgent(type) {
   selectedAgent.value = type
   editingSkill.value = null
+}
+
+function activeSkillFor(type) {
+  return activeSkills.value[type] || type
+}
+
+function isActiveSkill(id) {
+  return activeSkillFor(selectedAgent.value) === id
+}
+
+async function setActiveSkill(id) {
+  try {
+    const res = await skillsAPI.setActive(selectedAgent.value, id)
+    activeSkills.value = { ...activeSkills.value, [selectedAgent.value]: res.skill_id }
+    toast.success(`已应用 Skill「${id}」`)
+  } catch (e) {
+    toast.error(e.message)
+  }
 }
 
 function startAddSkill() {
@@ -1000,6 +1157,7 @@ function handleSettingsDialogKeydown(event) {
 onMounted(() => {
   loadCfgs()
   loadAgents()
+  loadStylePrompts()
   loadAllSkills()
   window.addEventListener('keydown', handleSettingsDialogKeydown)
 })
@@ -1287,6 +1445,21 @@ onBeforeUnmount(() => {
 .skill-card-head:hover { background: var(--bg-hover); }
 .skill-card-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
 .skill-card-foot { display: flex; align-items: center; gap: 8px; }
+
+/* Style prompts */
+.style-prompt-list { display: grid; gap: 14px; }
+.style-prompt-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.style-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.style-prompt-title { font-size: 14px; font-weight: 700; color: var(--text-0); }
+.style-prompt-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 0 4px;
+  background: linear-gradient(to top, var(--bg-base) 80%, rgba(248,250,254,0));
+}
 
 /* Shared */
 .field { display: flex; flex-direction: column; gap: 5px; }

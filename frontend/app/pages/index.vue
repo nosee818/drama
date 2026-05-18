@@ -193,6 +193,8 @@ const styles = [
   { label: '电影感', value: 'cinematic' },
   { label: '漫画', value: 'comic' },
   { label: '水彩', value: 'watercolor' },
+  { label: '无风格', value: 'none' },
+  { label: '自定义风格', value: 'custom' },
 ]
 const styleSelectOptions = computed(() => styles)
 const orientationOptions = [

@@ -7,17 +7,25 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { spawnSync } from 'child_process'
-import { createAgent } from '../agents/index.js'
+import { generateWithTextFailover } from '../agents/index.js'
 import { generateImage } from '../services/image-generation.js'
 import { generateVideo } from '../services/video-generation.js'
+import { generateVoiceSample } from '../services/tts-generation.js'
 import { composeStoryboard } from '../services/ffmpeg-compose.js'
 import { mergeEpisodeVideos } from '../services/ffmpeg-merge.js'
+import { getTextConfigCandidates, type AIConfig } from '../services/ai.js'
 import { dramaOrientation, normalizeOrientation, orientationAspectRatio, orientationImageSize, orientationVideoSize, parseSize } from '../utils/aspect.js'
 
 const app = new Hono()
 
 const EPISODE_HEADING_RE = /(?:^|\n)\s*(?:#{1,6}\s*)?(?:第\s*[0-9一二三四五六七八九十百千]+\s*[集章节回]|episode\s*\d+|ep\s*\d+|第\s*\d+\s*集)[^\n\r]*/gi
 const AUTO_TARGET_ORDER = ['storyboard', 'shot_images', 'videos', 'compose'] as const
+const AUTO_IMAGE_WAIT_ATTEMPTS = 720
+const AUTO_IMAGE_WAIT_DELAY_MS = 5000
+const AUTO_VIDEO_WAIT_ATTEMPTS = 720
+const AUTO_VIDEO_WAIT_DELAY_MS = 5000
+const AUTO_MERGE_WAIT_ATTEMPTS = 360
+const AUTO_MERGE_WAIT_DELAY_MS = 5000
 type AutoTarget = typeof AUTO_TARGET_ORDER[number]
 type AutoJob = {
   id: string
@@ -26,10 +34,11 @@ type AutoJob = {
   regenerateMode?: 'missing' | 'overwrite'
   endEpisode?: number | null
   episodeNumbers?: number[]
+  concurrency?: number
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
   message: string
   detail?: string
-  currentStage?: AutoTarget | 'script' | 'extract' | 'character_images' | 'scene_images'
+  currentStage?: AutoTarget | 'script' | 'extract' | 'voice_design' | 'voice_samples' | 'character_images' | 'scene_images'
   currentEpisode?: number
   currentEpisodeTitle?: string
   completedEpisodes: number
@@ -47,11 +56,7 @@ function normalizeStyle(style?: string | null) {
 }
 
 function emptyScenePrompt(prompt: string) {
-  const base = String(prompt || '').trim()
-  const guard = '空场景，纯环境背景，没有任何人物、脸、身体、手、剪影、人群或角色，重点表现空间结构、陈设、光线和氛围，不要文字、签名或水印'
-  if (!base) return guard
-  if (/空场景|无人|无人物|不要出现人物|没有任何人物/.test(base)) return base
-  return `${base}，${guard}`
+  return String(prompt || '').trim()
 }
 
 async function readCreateBody(c: any) {
@@ -248,8 +253,32 @@ function markEpisodeJob(job: AutoJob, episodeNumber: number, status: 'pending' |
   updateJob(job, { episodeStatus: next })
 }
 
+function assertAutoJobActive(job?: AutoJob | null) {
+  if (job?.status === 'cancelled') throw new Error('任务已取消')
+}
+
 function describeTarget(target: AutoTarget) {
   return ({ storyboard: '分镜', shot_images: '镜头图片', videos: '视频生成', compose: '最终拼接' } as Record<AutoTarget, string>)[target] || target
+}
+
+function splitConfiguredBaseUrls(value?: string | null) {
+  return String(value || '')
+    .split(/[\s,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function resolveAutoConcurrency(drama: any, requested?: number | null) {
+  const requestedValue = Number(requested || 0)
+  if (Number.isFinite(requestedValue) && requestedValue > 0) return Math.max(1, Math.min(12, Math.floor(requestedValue)))
+  const textConfigId = getProjectTextConfigId(drama)
+  const rows = db.select().from(schema.aiServiceConfigs)
+    .where(eq(schema.aiServiceConfigs.serviceType, 'text'))
+    .all()
+    .filter((row: any) => row.isActive)
+  const row = textConfigId ? rows.find((item: any) => item.id === textConfigId) : rows.find((item: any) => item.isDefault) || rows[0]
+  const count = splitConfiguredBaseUrls(row?.baseUrl).length || 1
+  return Math.max(1, Math.min(12, count))
 }
 
 function resolveAutoEpisodes(dramaId: number, endEpisode?: number | null, episodeNumbers: number[] = []) {
@@ -273,8 +302,14 @@ function inspectExistingAutoAssets(episodes: any[], target: AutoTarget) {
     shotImages: storyboards.filter(sb => sb.firstFrameImage || sb.lastFrameImage || sb.composedImage).length,
     videos: storyboards.filter(sb => sb.videoUrl).length,
     composedVideos: storyboards.filter(sb => sb.composedVideoUrl).length,
+    rewrittenScripts: episodes.filter(ep => ep.scriptContent && normalizedScriptText(ep.scriptContent) !== normalizedScriptText(ep.content)).length,
+    characterLinks: db.select().from(schema.episodeCharacters).all().filter((link: any) => episodeIds.has(link.episodeId)).length,
+    sceneLinks: db.select().from(schema.episodeScenes).all().filter((link: any) => episodeIds.has(link.episodeId)).length,
   }
   const warnings = []
+  if (targetReached(target, 'storyboard') && counts.rewrittenScripts) warnings.push(`已有 ${counts.rewrittenScripts} 集 AI 改写内容`)
+  if (targetReached(target, 'storyboard') && counts.characterLinks) warnings.push(`已有 ${counts.characterLinks} 个角色绑定`)
+  if (targetReached(target, 'storyboard') && counts.sceneLinks) warnings.push(`已有 ${counts.sceneLinks} 个场景绑定`)
   if (targetReached(target, 'storyboard') && counts.storyboards) warnings.push(`已有 ${counts.storyboards} 个分镜`)
   if (targetReached(target, 'shot_images') && counts.shotImages) warnings.push(`已有 ${counts.shotImages} 个镜头图片`)
   if (targetReached(target, 'videos') && counts.videos) warnings.push(`已有 ${counts.videos} 个镜头视频`)
@@ -322,6 +357,84 @@ function resetAutoAssets(episodes: any[], target: AutoTarget) {
   }
 }
 
+function clearDramaGeneratedAssets(dramaId: number) {
+  const ts = now()
+  const episodes = db.select().from(schema.episodes).where(eq(schema.episodes.dramaId, dramaId)).all()
+  const episodeIds = new Set(episodes.map((ep: any) => ep.id))
+  const storyboards = db.select().from(schema.storyboards).all().filter((sb: any) => episodeIds.has(sb.episodeId))
+  const scenes = db.select().from(schema.scenes).where(eq(schema.scenes.dramaId, dramaId)).all()
+  const characters = db.select().from(schema.characters).where(eq(schema.characters.dramaId, dramaId)).all()
+  const props = db.select().from(schema.props).where(eq(schema.props.dramaId, dramaId)).all()
+  const videoMerges = db.select().from(schema.videoMerges).where(eq(schema.videoMerges.dramaId, dramaId)).all()
+  const imageGenerations = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.dramaId, dramaId)).all()
+  const videoGenerations = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.dramaId, dramaId)).all()
+  const assets = db.select().from(schema.assets).where(eq(schema.assets.dramaId, dramaId)).all()
+  let clearedAutoJobs = 0
+
+  for (const job of autoJobs.values()) {
+    if (job.dramaId !== dramaId) continue
+    updateJob(job, {
+      status: 'cancelled',
+      message: '任务已取消',
+      detail: '项目生成内容已清除',
+      error: undefined,
+    })
+    addJobLog(job, '项目生成内容已清除，任务取消')
+    const nextStatus = { ...(job.episodeStatus || {}) }
+    for (const key of Object.keys(nextStatus)) {
+      if (nextStatus[key]?.status === 'running' || nextStatus[key]?.status === 'pending') {
+        nextStatus[key] = { ...nextStatus[key], status: 'cancelled', message: '已取消' }
+      }
+    }
+    updateJob(job, { episodeStatus: nextStatus })
+    autoJobs.delete(job.id)
+    clearedAutoJobs += 1
+  }
+
+  for (const sb of storyboards) {
+    db.delete(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, sb.id)).run()
+  }
+  for (const ep of episodes) {
+    db.delete(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).run()
+    db.delete(schema.episodeScenes).where(eq(schema.episodeScenes.episodeId, ep.id)).run()
+    db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, ep.id)).run()
+    db.update(schema.episodes)
+      .set({
+        scriptContent: null,
+        description: null,
+        duration: 0,
+        status: 'draft',
+        videoUrl: null,
+        thumbnail: null,
+        updatedAt: ts,
+      })
+      .where(eq(schema.episodes.id, ep.id))
+      .run()
+  }
+
+  db.delete(schema.characters).where(eq(schema.characters.dramaId, dramaId)).run()
+  db.delete(schema.scenes).where(eq(schema.scenes.dramaId, dramaId)).run()
+  db.delete(schema.props).where(eq(schema.props.dramaId, dramaId)).run()
+  db.delete(schema.imageGenerations).where(eq(schema.imageGenerations.dramaId, dramaId)).run()
+  db.delete(schema.videoGenerations).where(eq(schema.videoGenerations.dramaId, dramaId)).run()
+  db.delete(schema.videoMerges).where(eq(schema.videoMerges.dramaId, dramaId)).run()
+  db.delete(schema.assets).where(eq(schema.assets.dramaId, dramaId)).run()
+  db.update(schema.dramas).set({ thumbnail: null, totalDuration: 0, updatedAt: ts }).where(eq(schema.dramas.id, dramaId)).run()
+
+  return {
+    episodes: episodes.length,
+    storyboards: storyboards.length,
+    characters: characters.length,
+    scenes: scenes.length,
+    props: props.length,
+    image_generations: imageGenerations.length,
+    video_generations: videoGenerations.length,
+    video_merges: videoMerges.length,
+    assets: assets.length,
+    auto_jobs: clearedAutoJobs,
+  }
+}
+
 function getEpisodeStoryboards(episodeId: number) {
   return db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
@@ -342,14 +455,52 @@ function getProjectImageConfigId(drama: any, kind: 'character' | 'scene' | 'shot
   return Number(defaults[key] || defaults.image_config_id || fallback || 0) || undefined
 }
 
-async function runEpisodeAgent(agentType: string, message: string, dramaId: number, episodeId: number, textConfigId?: number | null) {
-  const agent = createAgent(agentType, episodeId, dramaId, { textConfigId })
-  if (!agent) throw new Error(`Agent not found: ${agentType}`)
-  await agent.generate([{ role: 'user', content: message }], { maxSteps: 20 })
+function getProjectAudioDesignConfigId(drama: any, fallback?: number | null) {
+  const metadata = drama.metadata ? safeJson(drama.metadata) : {}
+  const defaults = metadata?.ai_defaults || {}
+  return Number(defaults.audio_design_config_id || defaults.audio_config_id || fallback || 0) || undefined
 }
 
-async function waitFor<T>(read: () => T, done: (value: T) => boolean, label: string, attempts = 180, delay = 3000) {
+async function runEpisodeAgent(agentType: string, message: string, dramaId: number, episodeId: number, textConfigId?: number | null, textConfig?: AIConfig | null) {
+  await generateWithTextFailover(agentType, episodeId, dramaId, message, { textConfigId, textConfig, maxSteps: 20 })
+}
+
+function assignEpisodeTextConfigs(episodes: any[], textConfigId?: number | null) {
+  const candidates = getTextConfigCandidates(textConfigId)
+  const assignments = new Map<number, AIConfig>()
+  if (!candidates.length) return assignments
+  episodes.forEach((ep, index) => {
+    assignments.set(ep.id, candidates[index % candidates.length])
+  })
+  return assignments
+}
+
+function createDeferred<T = void>() {
+  let resolve!: (value?: T | PromiseLike<T>) => void
+  let reject!: (reason?: any) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res as (value?: T | PromiseLike<T>) => void
+    reject = rej
+  })
+  promise.catch(() => {})
+  return { promise, resolve, reject }
+}
+
+async function runLimited<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>) {
+  let cursor = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, async () => {
+    while (true) {
+      const index = cursor++
+      if (index >= items.length) return
+      await worker(items[index], index)
+    }
+  })
+  await Promise.all(workers)
+}
+
+async function waitFor<T>(read: () => T, done: (value: T) => boolean, label: string, attempts = 180, delay = 3000, job?: AutoJob) {
   for (let i = 0; i < attempts; i++) {
+    assertAutoJobActive(job)
     const value = read()
     if (done(value)) return value
     await sleep(delay)
@@ -358,16 +509,15 @@ async function waitFor<T>(read: () => T, done: (value: T) => boolean, label: str
 }
 
 function getStoryboardImagePrompt(sb: any) {
+  if (sb.imagePrompt) return String(sb.imagePrompt || '').trim()
+
   return [
     sb.title ? `镜头标题：${sb.title}` : '',
-    (sb.imagePrompt || sb.description) ? `画面描述：${sb.imagePrompt || sb.description}` : '',
+    sb.description ? `画面描述：${sb.description}` : '',
     sb.shotType ? `景别：${sb.shotType}` : '',
     sb.angle ? `机位：${sb.angle}` : '',
     sb.location ? `地点：${sb.location}` : '',
     sb.time ? `时间：${sb.time}` : '',
-    sb.action ? `动作：${sb.action}` : '',
-    sb.atmosphere ? `氛围：${sb.atmosphere}` : '',
-    '生成这个镜头的起始关键帧，突出建立关系和动作开始瞬间',
   ].filter(Boolean).join('；')
 }
 
@@ -379,8 +529,10 @@ function buildCharacterReferencePrompt(char: any) {
     char.description ? `人物基础设定：${char.description}` : '',
     char.personality ? `气质性格：${char.personality}` : '',
     '生成可跨集复用的角色设定参考图',
-    '单人，清晰正面或三分之二侧身，五官清楚，表情自然中性，完整展示发型、发色、年龄感、身高体态、服装和标志性配饰',
-    '干净背景或浅色摄影棚背景，不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊，不要多人，不要文字水印',
+    '单人全身角色立绘，完整人物从头顶到脚底全部进入画面，头发、脸、上半身、双手、腿、脚踝、鞋子都必须清楚可见',
+    '人物直立站姿，居中构图，镜头距离足够远，身体上下留有少量空白，不裁切头部、手臂、腿部、脚部或衣摆',
+    '清晰正面或三分之二侧身，五官清楚，表情自然中性，完整展示发型、发色、年龄感、身高体态、服装和标志性配饰',
+    '干净背景或浅色纯色背景，按照项目视觉风格渲染，不要半身照、胸像、头像、近景、特写、坐姿、蹲姿、趴卧、被遮挡，不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊，不要多人，不要文字水印',
   ].filter(Boolean).join('；')
 }
 
@@ -389,6 +541,13 @@ function getEpisodeCharacters(ep: any) {
   const ids = new Set(links.map((link: any) => link.characterId))
   return db.select().from(schema.characters).all()
     .filter((char: any) => ids.has(char.id) && !char.deletedAt && !/旁白| narrator/i.test(`${char.name || ''} ${char.role || ''}`))
+}
+
+function getEpisodeVoiceCharacters(ep: any) {
+  const links = db.select().from(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).all()
+  const ids = new Set(links.map((link: any) => link.characterId))
+  return db.select().from(schema.characters).all()
+    .filter((char: any) => ids.has(char.id) && !char.deletedAt && !!char.voiceStyle)
 }
 
 function getEpisodeScenes(ep: any) {
@@ -416,22 +575,40 @@ function getStoryboardReferenceImages(sb: any) {
   return refs
 }
 
-async function ensureScriptAndContext(ep: any, drama: any, textConfigId?: number | null) {
-  if (!ep.scriptContent && ep.content) {
-    await runEpisodeAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', drama.id, ep.id, textConfigId)
+function normalizedScriptText(value?: string | null) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim()
+}
+
+function needsScriptRewrite(ep: any) {
+  const raw = normalizedScriptText(ep.content)
+  const script = normalizedScriptText(ep.scriptContent)
+  if (!raw) return false
+  if (!script) return true
+  return script === raw
+}
+
+async function ensureScriptRewrite(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
+  if (needsScriptRewrite(ep)) {
+    await runEpisodeAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', drama.id, ep.id, textConfigId, textConfig)
     await waitFor(
       () => db.select().from(schema.episodes).where(eq(schema.episodes.id, ep.id)).all()[0],
-      row => !!row?.scriptContent,
+      row => !!row?.scriptContent && normalizedScriptText(row.scriptContent) !== normalizedScriptText(row.content),
       `第${ep.episodeNumber}集 AI 改写`,
       80,
       3000,
+      job,
     )
   }
+}
 
+async function ensureExtractedContext(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
   const charLinks = db.select().from(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).all()
   const sceneLinks = db.select().from(schema.episodeScenes).where(eq(schema.episodeScenes.episodeId, ep.id)).all()
   if (!charLinks.length || !sceneLinks.length) {
-    await runEpisodeAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', drama.id, ep.id, textConfigId)
+    await runEpisodeAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', drama.id, ep.id, textConfigId, textConfig)
     await waitFor(
       () => ({
         chars: db.select().from(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).all().length,
@@ -441,33 +618,95 @@ async function ensureScriptAndContext(ep: any, drama: any, textConfigId?: number
       `第${ep.episodeNumber}集 角色场景提取`,
       80,
       3000,
+      job,
     )
   }
 }
 
-async function ensureStoryboards(ep: any, drama: any, textConfigId?: number | null) {
+async function ensureScriptAndContext(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
+  await ensureScriptRewrite(ep, drama, textConfigId, job, textConfig)
+  await ensureExtractedContext(ep, drama, textConfigId, job, textConfig)
+}
+
+async function ensureVoiceDesignAndSamples(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
+  assertAutoJobActive(job)
+  const linkedCharacters = db.select().from(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).all()
+  const linkedIds = new Set(linkedCharacters.map((link: any) => link.characterId))
+  const chars = db.select().from(schema.characters).all()
+    .filter((char: any) => linkedIds.has(char.id) && !char.deletedAt)
+  if (!chars.length) return
+
+  if (chars.some((char: any) => !char.voiceStyle)) {
+    if (job) {
+      updateJob(job, { currentStage: 'voice_design', detail: `第 ${ep.episodeNumber} 集：正在进行音色设计` })
+      addJobLog(job, '正在进行音色设计', ep.episodeNumber, 'voice_design')
+    }
+    await runEpisodeAgent('voice_assigner', '请根据当前角色资料，为所有需要配音的角色、旁白、系统音、画外音和临时声音角色生成中文声音设计提示词并保存。', drama.id, ep.id, textConfigId, textConfig)
+    assertAutoJobActive(job)
+    await waitFor(
+      () => getEpisodeVoiceCharacters(ep),
+      rows => rows.length > 0 && rows.every((char: any) => !!char.voiceStyle),
+      `第 ${ep.episodeNumber} 集音色设计`,
+      80,
+      3000,
+      job,
+    )
+  }
+
+  const audioDesignConfigId = getProjectAudioDesignConfigId(drama, ep.audioConfigId)
+  const voiceCharacters = getEpisodeVoiceCharacters(ep)
+  const missingSamples = voiceCharacters.filter((char: any) => !char.voiceSampleUrl)
+  if (!missingSamples.length) return
+  if (job) {
+    updateJob(job, { currentStage: 'voice_samples', detail: `第 ${ep.episodeNumber} 集：正在生成 ${missingSamples.length} 个试听音色` })
+    addJobLog(job, `正在生成 ${missingSamples.length} 个试听音色`, ep.episodeNumber, 'voice_samples')
+  }
+  await Promise.all(missingSamples.map(async (char: any) => {
+    assertAutoJobActive(job)
+    try {
+      const audioPath = await generateVoiceSample(char.name, String(char.voiceStyle || ''), audioDesignConfigId)
+      db.update(schema.characters)
+        .set({ voiceSampleUrl: audioPath, updatedAt: now() })
+        .where(eq(schema.characters.id, char.id))
+        .run()
+      if (job) addJobLog(job, `已生成试听音色：${char.name}`, ep.episodeNumber, 'voice_samples')
+    } catch (err: any) {
+      if (job) addJobLog(job, `试听音色生成失败：${char.name}，${err.message || String(err)}`, ep.episodeNumber, 'voice_samples')
+    }
+  }))
+}
+
+async function ensureStoryboards(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
   if (getEpisodeStoryboards(ep.id).length) return
-  await ensureScriptAndContext(ep, drama, textConfigId)
+  await ensureScriptAndContext(ep, drama, textConfigId, job, textConfig)
+  await ensureVoiceDesignAndSamples(ep, drama, textConfigId, job, textConfig)
+  assertAutoJobActive(job)
   await runEpisodeAgent(
     'storyboard_breaker',
     '请拆解分镜并生成中文视频提示词。请保持镜头连续、时长合理，并为后续图片和视频生成补全中文提示词。',
     drama.id,
     ep.id,
     textConfigId,
+    textConfig,
   )
+  assertAutoJobActive(job)
   await waitFor(
     () => getEpisodeStoryboards(ep.id),
     rows => rows.length > 0,
     `第${ep.episodeNumber}集 分镜拆解`,
     120,
     3000,
+    job,
   )
 }
 
 async function ensureCharacterImages(ep: any, drama: any) {
   const characters = getEpisodeCharacters(ep)
-  for (const char of characters) {
-    if (char.imageUrl) continue
+  const pendingCharacters = characters.filter((char: any) => !char.imageUrl)
+  if (!pendingCharacters.length) return
+  const tasks: Array<{ char: any; genId: number }> = []
+
+  for (const char of pendingCharacters) {
     const genId = await generateImage({
       characterId: char.id,
       dramaId: drama.id,
@@ -475,46 +714,60 @@ async function ensureCharacterImages(ep: any, drama: any) {
       size: orientationImageSize(dramaOrientation(drama)),
       configId: getProjectImageConfigId(drama, 'character', ep.imageConfigId),
     })
+    tasks.push({ char, genId })
+  }
+
+  await Promise.all(tasks.map(async ({ char, genId }) => {
     await waitFor(
       () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
       row => row?.status === 'completed' || row?.status === 'failed',
       `第${ep.episodeNumber}集 角色${char.name}形象`,
-      180,
-      3000,
+      AUTO_IMAGE_WAIT_ATTEMPTS,
+      AUTO_IMAGE_WAIT_DELAY_MS,
     )
     const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
     if (record?.status === 'failed') throw new Error(record.errorMsg || `角色${char.name}形象生成失败`)
-  }
+  }))
 }
 
 async function ensureSceneImages(ep: any, drama: any) {
   const scenes = getEpisodeScenes(ep)
-  for (const scene of scenes) {
-    if (scene.imageUrl) continue
+  const pendingScenes = scenes.filter((scene: any) => !scene.imageUrl)
+  if (!pendingScenes.length) return
+  const tasks: Array<{ scene: any; genId: number }> = []
+
+  for (const scene of pendingScenes) {
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, scene.id)).run()
     const genId = await generateImage({
       sceneId: scene.id,
       dramaId: drama.id,
-      prompt: emptyScenePrompt(scene.prompt || `${scene.location}，${scene.time || ''}，高质量场景图，电影感，清晰空间结构和光线氛围`),
+      prompt: emptyScenePrompt(scene.prompt || [scene.location, scene.time].filter(Boolean).join('，')),
       size: orientationImageSize(dramaOrientation(drama)),
       configId: getProjectImageConfigId(drama, 'scene', ep.imageConfigId),
     })
+    tasks.push({ scene, genId })
+  }
+
+  await Promise.all(tasks.map(async ({ scene, genId }) => {
     await waitFor(
       () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
       row => row?.status === 'completed' || row?.status === 'failed',
       `第${ep.episodeNumber}集 场景${scene.location}图片`,
-      180,
-      3000,
+      AUTO_IMAGE_WAIT_ATTEMPTS,
+      AUTO_IMAGE_WAIT_DELAY_MS,
     )
     const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
     if (record?.status === 'failed') throw new Error(record.errorMsg || `场景${scene.location}图片生成失败`)
-  }
+  }))
 }
 
 async function ensureShotImages(ep: any, drama: any) {
   const storyboards = getEpisodeStoryboards(ep.id)
-  for (const sb of storyboards) {
-    if (sb.firstFrameImage || sb.composedImage) continue
+  const pendingStoryboards = storyboards.filter((sb: any) => !(sb.firstFrameImage || sb.composedImage))
+  if (!pendingStoryboards.length) return
+  const tasks: Array<{ sb: any; genId: number }> = []
+
+  for (const sb of pendingStoryboards) {
     const referenceImages = getStoryboardReferenceImages(sb)
     const genId = await generateImage({
       storyboardId: sb.id,
@@ -525,16 +778,20 @@ async function ensureShotImages(ep: any, drama: any) {
       referenceImages: referenceImages.length ? referenceImages : undefined,
       configId: getProjectImageConfigId(drama, 'shot', ep.imageConfigId),
     })
+    tasks.push({ sb, genId })
+  }
+
+  await Promise.all(tasks.map(async ({ sb, genId }) => {
     await waitFor(
       () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()[0],
       row => row?.status === 'completed' || row?.status === 'failed',
       `第${ep.episodeNumber}集 镜头${sb.storyboardNumber}图片`,
-      180,
-      3000,
+      AUTO_IMAGE_WAIT_ATTEMPTS,
+      AUTO_IMAGE_WAIT_DELAY_MS,
     )
     const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
     if (record?.status === 'failed') throw new Error(record.errorMsg || `镜头${sb.storyboardNumber}图片生成失败`)
-  }
+  }))
 }
 
 async function ensureVideos(ep: any, drama: any) {
@@ -568,8 +825,8 @@ async function ensureVideos(ep: any, drama: any) {
       () => db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, task.genId)).all()[0],
       row => row?.status === 'completed' || row?.status === 'failed',
       `第${ep.episodeNumber}集 镜头${task.sb.storyboardNumber}视频`,
-      240,
-      4000,
+      AUTO_VIDEO_WAIT_ATTEMPTS,
+      AUTO_VIDEO_WAIT_DELAY_MS,
     )
     const [record] = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, task.genId)).all()
     if (record?.status === 'failed') throw new Error(record.errorMsg || `镜头${task.sb.storyboardNumber}视频生成失败`)
@@ -581,7 +838,6 @@ async function ensureComposed(ep: any, drama: any) {
   for (const sb of storyboards) {
     if (sb.composedVideoUrl) continue
     if (!sb.videoUrl) throw new Error(`第${ep.episodeNumber}集 镜头${sb.storyboardNumber}没有视频，无法合成`)
-    if (!sb.ttsAudioUrl) continue
     await composeStoryboard(sb.id)
   }
 
@@ -593,14 +849,14 @@ async function ensureComposed(ep: any, drama: any) {
     () => db.select().from(schema.videoMerges).where(eq(schema.videoMerges.id, mergeId)).all()[0],
     row => row?.status === 'completed' || row?.status === 'failed',
     `第${ep.episodeNumber}集 最终拼接`,
-    120,
-    4000,
+    AUTO_MERGE_WAIT_ATTEMPTS,
+    AUTO_MERGE_WAIT_DELAY_MS,
   )
   const [record] = db.select().from(schema.videoMerges).where(eq(schema.videoMerges.id, mergeId)).all()
   if (record?.status === 'failed') throw new Error(record.errorMsg || `第${ep.episodeNumber}集拼接失败`)
 }
 
-async function runAutoJob(job: AutoJob) {
+async function runAutoJobSequential(job: AutoJob) {
   const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, job.dramaId)).all()
   if (!drama) throw new Error('剧集不存在')
   const textConfigId = getProjectTextConfigId(drama)
@@ -657,8 +913,8 @@ async function runAutoJob(job: AutoJob) {
     }
     if (targetReached(job.target, 'compose')) {
       await waitIfPaused(job)
-      updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在执行视频配音合成；无配音镜头会跳过` })
-      addJobLog(job, '正在执行视频配音合成；无配音镜头会跳过', ep.episodeNumber, 'compose')
+      updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在执行视频配音合成；无台词镜头会输出静音视频` })
+      addJobLog(job, '正在执行视频配音合成；无台词镜头会输出静音视频', ep.episodeNumber, 'compose')
       await ensureComposed(ep, drama)
     }
     markEpisodeJob(job, ep.episodeNumber, 'completed', `已生成到${describeTarget(job.target)}`, job.target)
@@ -666,6 +922,233 @@ async function runAutoJob(job: AutoJob) {
     updateJob(job, { completedEpisodes: job.completedEpisodes + 1 })
   }
 
+  updateJob(job, { status: 'completed', message: '自动生成完成', detail: `已完成 ${job.completedEpisodes}/${job.totalEpisodes} 集` })
+  addJobLog(job, '任务完成')
+}
+
+async function processAutoEpisodeParallel(job: AutoJob, ep: any, drama: any, textConfigId?: number | null, textConfig?: AIConfig | null) {
+  await waitIfPaused(job)
+  updateJob(job, {
+    currentEpisode: ep.episodeNumber,
+    currentEpisodeTitle: ep.title,
+    currentStage: 'storyboard',
+    message: `正在处理第 ${ep.episodeNumber} 集：${ep.title}`,
+    detail: `目标到${describeTarget(job.target)}，正在补齐前置流程`,
+  })
+  markEpisodeJob(job, ep.episodeNumber, 'running', `正在生成到${describeTarget(job.target)}`, job.target)
+  addJobLog(job, `开始处理第 ${ep.episodeNumber} 集`, ep.episodeNumber)
+
+  if (targetReached(job.target, 'storyboard')) {
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'storyboard', detail: `第 ${ep.episodeNumber} 集：正在生成分镜` })
+    addJobLog(job, '正在生成分镜', ep.episodeNumber, 'storyboard')
+    await ensureStoryboards(ep, drama, textConfigId, job, textConfig)
+  }
+  if (targetReached(job.target, 'shot_images')) {
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'character_images', detail: `第 ${ep.episodeNumber} 集：正在生成角色形象` })
+    addJobLog(job, '正在生成角色形象', ep.episodeNumber, 'character_images')
+    await ensureCharacterImages(ep, drama)
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'scene_images', detail: `第 ${ep.episodeNumber} 集：正在生成场景图片` })
+    addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
+    await ensureSceneImages(ep, drama)
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在生成镜头图片` })
+    addJobLog(job, '正在生成镜头图片', ep.episodeNumber, 'shot_images')
+    await ensureShotImages(ep, drama)
+  }
+  if (targetReached(job.target, 'videos')) {
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'videos', detail: `第 ${ep.episodeNumber} 集：正在生成镜头视频` })
+    addJobLog(job, '正在生成镜头视频', ep.episodeNumber, 'videos')
+    await ensureVideos(ep, drama)
+  }
+  if (targetReached(job.target, 'compose')) {
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在执行视频配音合成；无台词镜头会输出静音视频` })
+    addJobLog(job, '正在执行视频配音合成；无台词镜头会输出静音视频', ep.episodeNumber, 'compose')
+    await ensureComposed(ep, drama)
+  }
+
+  markEpisodeJob(job, ep.episodeNumber, 'completed', `已生成到${describeTarget(job.target)}`, job.target)
+  addJobLog(job, `第 ${ep.episodeNumber} 集完成`, ep.episodeNumber)
+  updateJob(job, { completedEpisodes: job.completedEpisodes + 1 })
+}
+
+async function runAutoJob(job: AutoJob) {
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, job.dramaId)).all()
+  if (!drama) throw new Error('剧集不存在')
+  const textConfigId = getProjectTextConfigId(drama)
+  const episodes = resolveAutoEpisodes(job.dramaId, job.endEpisode, job.episodeNumbers || [])
+  job.totalEpisodes = episodes.length
+  if (!episodes.length) {
+    updateJob(job, { status: 'completed', message: '没有需要处理的剧集', detail: '没有匹配到本次任务范围内的剧集' })
+    return
+  }
+  const concurrency = Math.min(resolveAutoConcurrency(drama, job.concurrency), episodes.length)
+  job.concurrency = concurrency
+  if (job.regenerateMode === 'overwrite') {
+    updateJob(job, { detail: '正在按确认选项重置本次范围内资产' })
+    addJobLog(job, '已选择重新生成，正在重置本次范围内资产')
+    resetAutoAssets(episodes, job.target)
+  }
+  const textConfigByEpisode = assignEpisodeTextConfigs(episodes, textConfigId)
+  const rewriteDone = new Map<number, ReturnType<typeof createDeferred>>()
+  const contextDone = new Map<number, ReturnType<typeof createDeferred>>()
+  const storyboardDone = new Map<number, ReturnType<typeof createDeferred>>()
+  for (const ep of episodes) {
+    rewriteDone.set(ep.id, createDeferred())
+    contextDone.set(ep.id, createDeferred())
+    storyboardDone.set(ep.id, createDeferred())
+  }
+
+  updateJob(job, { detail: `目标到${describeTarget(job.target)}，文本任务并行 ${concurrency} 路，ComfyUI 制作任务不限并发下发` })
+  addJobLog(job, `任务开始：${episodes.map(ep => `第${ep.episodeNumber}集`).join('、')}，目标到${describeTarget(job.target)}，并行 ${concurrency}`)
+  addJobLog(job, 'AI 改写和分镜拆解按文本服务并行；角色、场景和音色按集顺序继承；ComfyUI 制作任务不限并发下发')
+
+  const rewriteQueue = runLimited(episodes, concurrency, async (ep) => {
+    const textConfig = textConfigByEpisode.get(ep.id)
+    try {
+      await waitIfPaused(job)
+      assertAutoJobActive(job)
+      markEpisodeJob(job, ep.episodeNumber, 'running', '正在 AI 改写', 'script')
+      updateJob(job, {
+        currentEpisode: ep.episodeNumber,
+        currentEpisodeTitle: ep.title,
+        currentStage: 'script',
+        message: `正在并行改写第 ${ep.episodeNumber} 集`,
+        detail: textConfig?.name ? `第 ${ep.episodeNumber} 集锁定文本服务：${textConfig.name}` : `第 ${ep.episodeNumber} 集正在 AI 改写`,
+      })
+      addJobLog(job, textConfig?.name ? `开始 AI 改写（${textConfig.name}）` : '开始 AI 改写', ep.episodeNumber, 'script')
+      await ensureScriptRewrite(ep, drama, textConfigId, job, textConfig)
+      addJobLog(job, 'AI 改写完成', ep.episodeNumber, 'script')
+      markEpisodeJob(job, ep.episodeNumber, 'pending', 'AI 改写完成，等待前序继承', 'extract')
+      rewriteDone.get(ep.id)?.resolve()
+    } catch (err) {
+      rewriteDone.get(ep.id)?.reject(err)
+      throw err
+    }
+  })
+
+  const contextQueue = (async () => {
+    for (const ep of episodes) {
+      await waitIfPaused(job)
+      const textConfig = textConfigByEpisode.get(ep.id)
+      try {
+        await rewriteDone.get(ep.id)?.promise
+        await waitIfPaused(job)
+        assertAutoJobActive(job)
+        updateJob(job, {
+          currentEpisode: ep.episodeNumber,
+          currentEpisodeTitle: ep.title,
+          currentStage: 'extract',
+          message: `正在整理第 ${ep.episodeNumber} 集共享设定`,
+          detail: `第 ${ep.episodeNumber} 集：角色场景提取和音色设计按顺序继承`,
+        })
+        markEpisodeJob(job, ep.episodeNumber, 'running', '正在整理共享设定', 'extract')
+        addJobLog(job, '开始提取角色场景', ep.episodeNumber, 'extract')
+        await ensureExtractedContext(ep, drama, textConfigId, job, textConfig)
+        addJobLog(job, '角色场景提取完成', ep.episodeNumber, 'extract')
+        await ensureVoiceDesignAndSamples(ep, drama, textConfigId, job, textConfig)
+        addJobLog(job, '共享设定整理完成，进入制作队列', ep.episodeNumber, 'extract')
+        contextDone.get(ep.id)?.resolve()
+      } catch (err) {
+        contextDone.get(ep.id)?.reject(err)
+        throw err
+      }
+    }
+  })()
+
+  const storyboardQueue = runLimited(episodes, concurrency, async (ep) => {
+    await contextDone.get(ep.id)?.promise
+    await waitIfPaused(job)
+    try {
+      assertAutoJobActive(job)
+      updateJob(job, {
+        currentEpisode: ep.episodeNumber,
+        currentEpisodeTitle: ep.title,
+        currentStage: 'storyboard',
+        message: `正在拆解第 ${ep.episodeNumber} 集分镜`,
+        detail: `第 ${ep.episodeNumber} 集：正在生成分镜`,
+      })
+      markEpisodeJob(job, ep.episodeNumber, 'running', '正在生成分镜', 'storyboard')
+      addJobLog(job, '正在生成分镜', ep.episodeNumber, 'storyboard')
+      await ensureStoryboards(ep, drama, textConfigId, job, textConfigByEpisode.get(ep.id))
+      addJobLog(job, '分镜拆解完成', ep.episodeNumber, 'storyboard')
+      storyboardDone.get(ep.id)?.resolve()
+
+      if (!targetReached(job.target, 'shot_images')) {
+        markEpisodeJob(job, ep.episodeNumber, 'completed', `已生成到${describeTarget(job.target)}`, job.target)
+        addJobLog(job, `第 ${ep.episodeNumber} 集完成`, ep.episodeNumber)
+        updateJob(job, { completedEpisodes: job.completedEpisodes + 1 })
+      } else {
+        markEpisodeJob(job, ep.episodeNumber, 'pending', '分镜完成，等待制作任务', 'character_images')
+      }
+    } catch (err: any) {
+      storyboardDone.get(ep.id)?.reject(err)
+      const wasCancelled = job.status === 'cancelled' || String(err.message || err).includes('取消')
+      markEpisodeJob(job, ep.episodeNumber, wasCancelled ? 'cancelled' : 'failed', wasCancelled ? '任务已取消' : '任务失败', job.currentStage)
+      throw err
+    }
+  })
+
+  const productionQueue = targetReached(job.target, 'shot_images')
+    ? runLimited(episodes, Math.max(1, episodes.length), async (ep) => {
+      await storyboardDone.get(ep.id)?.promise
+      await waitIfPaused(job)
+      try {
+        assertAutoJobActive(job)
+        markEpisodeJob(job, ep.episodeNumber, 'running', `正在生成到${describeTarget(job.target)}`, 'character_images')
+        updateJob(job, {
+          currentEpisode: ep.episodeNumber,
+          currentEpisodeTitle: ep.title,
+          currentStage: 'character_images',
+          message: `正在制作第 ${ep.episodeNumber} 集素材`,
+          detail: `第 ${ep.episodeNumber} 集：正在不限并发下发 ComfyUI 制作任务`,
+        })
+
+        await waitIfPaused(job)
+        updateJob(job, { currentStage: 'character_images', detail: `第 ${ep.episodeNumber} 集：正在生成角色形象` })
+        addJobLog(job, '正在生成角色形象', ep.episodeNumber, 'character_images')
+        await ensureCharacterImages(ep, drama)
+
+        await waitIfPaused(job)
+        updateJob(job, { currentStage: 'scene_images', detail: `第 ${ep.episodeNumber} 集：正在生成场景图片` })
+        addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
+        await ensureSceneImages(ep, drama)
+
+        await waitIfPaused(job)
+        updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在生成镜头图片` })
+        addJobLog(job, '正在生成镜头图片', ep.episodeNumber, 'shot_images')
+        await ensureShotImages(ep, drama)
+
+        if (targetReached(job.target, 'videos')) {
+          await waitIfPaused(job)
+          updateJob(job, { currentStage: 'videos', detail: `第 ${ep.episodeNumber} 集：正在生成镜头视频` })
+          addJobLog(job, '正在生成镜头视频', ep.episodeNumber, 'videos')
+          await ensureVideos(ep, drama)
+        }
+        if (targetReached(job.target, 'compose')) {
+          await waitIfPaused(job)
+          updateJob(job, { currentStage: 'compose', detail: `第 ${ep.episodeNumber} 集：正在执行视频配音合成；无台词镜头会输出静音视频` })
+          addJobLog(job, '正在执行视频配音合成；无台词镜头会输出静音视频', ep.episodeNumber, 'compose')
+          await ensureComposed(ep, drama)
+        }
+
+        markEpisodeJob(job, ep.episodeNumber, 'completed', `已生成到${describeTarget(job.target)}`, job.target)
+        addJobLog(job, `第 ${ep.episodeNumber} 集完成`, ep.episodeNumber)
+        updateJob(job, { completedEpisodes: job.completedEpisodes + 1 })
+      } catch (err: any) {
+        const wasCancelled = job.status === 'cancelled' || String(err.message || err).includes('取消')
+        markEpisodeJob(job, ep.episodeNumber, wasCancelled ? 'cancelled' : 'failed', wasCancelled ? '任务已取消' : '任务失败', job.currentStage)
+        throw err
+      }
+    })
+    : Promise.resolve()
+
+  await Promise.all([rewriteQueue, contextQueue, storyboardQueue, productionQueue])
+  assertAutoJobActive(job)
   updateJob(job, { status: 'completed', message: '自动生成完成', detail: `已完成 ${job.completedEpisodes}/${job.totalEpisodes} 集` })
   addJobLog(job, '任务完成')
 }
@@ -679,7 +1162,7 @@ app.get('/', async (c) => {
 
   let query = db.select().from(schema.dramas).where(isNull(schema.dramas.deletedAt))
 
-  const allRows = await query.orderBy(desc(schema.dramas.updatedAt))
+  const allRows = await query.orderBy(desc(schema.dramas.createdAt))
   let filtered = allRows
 
   if (status) filtered = filtered.filter(d => d.status === status)
@@ -760,7 +1243,7 @@ app.post('/', async (c) => {
       episodeNumber: i,
       title: `第${i}集`,
       content,
-      scriptContent: content,
+      scriptContent: null,
       status: 'draft',
       createdAt: ts,
       updatedAt: ts,
@@ -799,6 +1282,9 @@ app.post('/:id/auto-generate', async (c) => {
   const endEpisode = body.end_episode === undefined || body.end_episode === null || body.end_episode === ''
     ? null
     : Math.max(1, Number(body.end_episode))
+  const requestedConcurrency = body.concurrency === undefined || body.concurrency === null || body.concurrency === ''
+    ? null
+    : Number(body.concurrency)
   if (!AUTO_TARGET_ORDER.includes(target)) {
     return badRequest(c, 'target must be storyboard, shot_images, videos or compose')
   }
@@ -812,6 +1298,7 @@ app.post('/:id/auto-generate', async (c) => {
   const matchedEpisodes = resolveAutoEpisodes(id, endEpisode, episodeNumbers)
   const totalEpisodes = matchedEpisodes.length
   if (!totalEpisodes) return badRequest(c, '没有匹配到需要自动生成的剧集')
+  const concurrency = resolveAutoConcurrency(drama, requestedConcurrency)
   const ts = new Date().toISOString()
   const job: AutoJob = {
     id: `${id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -820,6 +1307,7 @@ app.post('/:id/auto-generate', async (c) => {
     regenerateMode,
     endEpisode,
     episodeNumbers,
+    concurrency,
     status: 'running',
     message: episodeNumbers.length
       ? `自动生成已开始，将处理指定的 ${episodeNumbers.length} 集`
@@ -868,12 +1356,20 @@ app.post('/:id/auto-generate-preview', async (c) => {
   if (!AUTO_TARGET_ORDER.includes(target)) return badRequest(c, 'target must be storyboard, shot_images, videos or compose')
   const episodes = resolveAutoEpisodes(id, endEpisode, episodeNumbers)
   if (!episodes.length) return badRequest(c, '没有匹配到需要自动生成的剧集')
-  return success(c, {
+  const preview = {
     target,
     target_label: describeTarget(target),
     total_episodes: episodes.length,
     ...inspectExistingAutoAssets(episodes, target),
-  })
+  }
+  const interrupted = [...autoJobs.values()]
+    .filter(job => job.dramaId === id && job.target === target && ['cancelled', 'failed'].includes(job.status))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+  if (interrupted && !preview.hasExisting) {
+    preview.hasExisting = true
+    preview.warnings = ['检测到上一次自动任务未完成', ...(preview.warnings || [])]
+  }
+  return success(c, preview)
 })
 
 // GET /dramas/:id/auto-generate/:jobId — 查询自动生成进度
@@ -930,9 +1426,28 @@ app.post('/:id/auto-generate/:jobId/control', async (c) => {
   if (action === 'cancel') {
     addJobLog(job, '用户取消任务')
     updateJob(job, { status: 'cancelled', message: '自动生成已取消', detail: '任务会在当前步骤结束或下一次检查时停止' })
+    for (const [episodeNumber, state] of Object.entries(job.episodeStatus || {})) {
+      if (state.status === 'running' || state.status === 'pending') {
+        markEpisodeJob(job, Number(episodeNumber), 'cancelled', '任务已取消', state.stage)
+      }
+    }
+    updateJob(job, { status: 'cancelled', message: '自动生成已终止', detail: '已停止分发新任务；正在进行的模型请求返回后不会继续后续步骤' })
     return success(c, job)
   }
   return badRequest(c, 'action must be pause, resume or cancel')
+})
+
+// POST /dramas/:id/clear-generated - Clear generated project assets for testing
+app.post('/:id/clear-generated', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, id)).all()
+  if (!drama || drama.deletedAt) return notFound(c, '剧本不存在')
+
+  const body = await c.req.json().catch(() => ({}))
+  if (body.confirm !== 'CLEAR') return badRequest(c, '请确认清除操作')
+
+  const counts = clearDramaGeneratedAssets(id)
+  return success(c, counts)
 })
 
 // GET /dramas/:id - Get drama detail

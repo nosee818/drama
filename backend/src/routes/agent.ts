@@ -2,7 +2,7 @@
  * Agent 聊天路由 — 非流式版本
  */
 import { Hono } from 'hono'
-import { createAgent, validAgentTypes } from '../agents/index.js'
+import { agentRunningMessage, generateWithTextFailover, validAgentTypes } from '../agents/index.js'
 import { success, badRequest } from '../utils/response.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -112,39 +112,26 @@ app.post('/:type/chat', async (c) => {
     episodeId,
     textConfigId: text_config_id ? Number(text_config_id) : null,
     status: 'running',
-    message: agentType === 'storyboard_breaker' ? '正在生成分镜' : `正在运行 ${agentType}`,
+    message: agentRunningMessage(agentType),
     startedAt,
     updatedAt: startedAt,
   })
 
-  const agent = createAgent(agentType, episodeId, dramaId, {
-    textConfigId: text_config_id ? Number(text_config_id) : null,
-  })
-  if (!agent) {
-    const currentRun = agentRuns.get(runKey)
-    if (currentRun) {
-      agentRuns.set(runKey, {
-        ...currentRun,
-        status: 'failed',
-        message: '任务失败',
-        error: 'Agent not found',
-        updatedAt: new Date().toISOString(),
-      })
-    }
-    logTaskError('Agent', agentType, { reason: 'agent not found' })
-    return badRequest(c, 'Agent not found')
-  }
-
   const startTime = performance.now()
 
   try {
-    const result = await agent.generate(
-      [{ role: 'user', content: message }],
-      { maxSteps: 20 },
-    )
+    const { result, textConfig, attempts } = await generateWithTextFailover(agentType, episodeId, dramaId, message, {
+      textConfigId: text_config_id ? Number(text_config_id) : null,
+      maxSteps: 20,
+    })
 
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)
-    logTaskSuccess('Agent', agentType, { elapsedSeconds: elapsed })
+    logTaskSuccess('Agent', agentType, {
+      elapsedSeconds: elapsed,
+      textConfigId: textConfig.id || null,
+      textConfigName: textConfig.name || '',
+      attempts,
+    })
     const currentRun = agentRuns.get(runKey)
     if (currentRun) {
       agentRuns.set(runKey, {

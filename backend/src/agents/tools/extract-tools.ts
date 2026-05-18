@@ -150,6 +150,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
         description: z.string().optional(),
         appearance: z.string().optional(),
         personality: z.string().optional(),
+        voice_style: z.string().optional().describe('Concrete Chinese voice design prompt for this character, suitable for TTS voice design.'),
       })),
     }),
     execute: async ({ characters }) => {
@@ -174,6 +175,9 @@ export function createExtractTools(episodeId: number, dramaId: number) {
             description: mergeStableField(char.description, existing.description),
             appearance: mergeStableField(char.appearance, existing.appearance),
             personality: mergeStableField(char.personality, existing.personality),
+            voiceStyle: char.voice_style || existing.voiceStyle,
+            voiceProvider: char.voice_style ? 'custom-design' : existing.voiceProvider,
+            voiceSampleUrl: char.voice_style && char.voice_style !== existing.voiceStyle ? null : existing.voiceSampleUrl,
             updatedAt: ts,
           }).where(eq(schema.characters.id, existing.id)).run()
           linkCharToEpisode(episodeId, existing.id)
@@ -186,6 +190,8 @@ export function createExtractTools(episodeId: number, dramaId: number) {
             description: char.description || '',
             appearance: char.appearance || '',
             personality: char.personality || '',
+            voiceStyle: char.voice_style || '',
+            voiceProvider: char.voice_style ? 'custom-design' : '',
             dramaId,
             createdAt: ts,
             updatedAt: ts,

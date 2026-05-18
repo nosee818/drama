@@ -4,7 +4,7 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { splitGridImage } from '../services/grid-split.js'
-import { createAgent } from '../agents/index.js'
+import { generateWithTextFailover } from '../agents/index.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -353,26 +353,18 @@ async function tryAgentGridPrompt(
   mode: string,
   referenceLegend: string,
 ) {
-  const agent = createAgent('grid_prompt_generator', episodeId, dramaId)
-  if (!agent) return null
-
-  const result = await agent.generate(
-    [{
-      role: 'user',
-      content: [
-        '请为宫格图生成提示词，并优先调用工具完成。',
-        `选中镜头ID：${JSON.stringify(storyboardIds)}`,
-        `行数：${rows}`,
-        `列数：${cols}`,
-        `模式：${mode}`,
-        referenceLegend ? `参考图映射：${referenceLegend}` : '',
-        '当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。',
-        `必须严格按 ${rows}x${cols} 生成，总共 exactly ${rows * cols} visible panels。不要合并格子，不要缺格。`,
-        '必须返回 JSON，结构为：{"grid_prompt":"...","cell_prompts":[{"shot_number":1,"frame_type":"first_frame","prompt":"..."}]}',
-      ].join('\n'),
-    }],
-    { maxSteps: 10 },
-  )
+  const message = [
+    '请为宫格图生成提示词，并优先调用工具完成。',
+    `选中镜头ID：${JSON.stringify(storyboardIds)}`,
+    `行数：${rows}`,
+    `列数：${cols}`,
+    `模式：${mode}`,
+    referenceLegend ? `参考图映射：${referenceLegend}` : '',
+    '当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。',
+    `必须严格按 ${rows}x${cols} 生成，总共 exactly ${rows * cols} visible panels。不要合并格子，不要缺格。`,
+    '必须返回 JSON，结构为：{"grid_prompt":"...","cell_prompts":[{"shot_number":1,"frame_type":"first_frame","prompt":"..."}]}',
+  ].join('\n')
+  const { result } = await generateWithTextFailover('grid_prompt_generator', episodeId, dramaId, message, { maxSteps: 10 })
 
   const fromTools = findGridPayload(result.toolResults)
   if (fromTools) return fromTools

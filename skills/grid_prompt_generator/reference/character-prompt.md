@@ -3,17 +3,21 @@
 ## 模板结构
 
 ```
-A [gender] [age] character, [name], [body type], [facial features].
-[Hair description]. [Clothing details].
-[Pose and expression]. [Background: simple/gradient].
-Style: [art style], high quality, detailed, character concept art.
+单人全身角色立绘，完整人物从头顶到脚底全部进入画面，头发、脸、上半身、双手、腿、脚踝、鞋子都必须清楚可见。
+[性别与年龄感]，[姓名]，[身高体态]，[脸型五官]，[发型发色]。
+[服装细节，衣摆到鞋子完整可见]。
+人物直立站姿，居中构图，镜头距离足够远，身体上下留有少量空白，干净浅色背景。
+[气质与角色定位]，高质量角色设定图，统一美术风格。
+不要半身照、胸像、头像、近景、特写、坐姿、蹲姿、趴卧、被遮挡、裁切头部、裁切手臂、裁切腿部、裁切脚部、裁切衣摆、多人、文字、标签、水印。
 ```
 
 ## 示例
 
 ```
-A young woman in her early 20s, Li Mei, slender build, delicate oval face with bright almond eyes.
-Long black hair flowing over shoulders with subtle waves. Wearing a vintage blue qipao with floral embroidery.
-Standing confidently with a slight smile, one hand on hip. Background: soft gradient.
-Style: cinematic anime, high quality, detailed, character concept art.
+单人全身角色立绘，完整人物从头顶到脚底全部进入画面，头发、脸、上半身、双手、腿、脚踝、鞋子都必须清楚可见。
+20岁出头的年轻女性李梅，身形纤细，鹅蛋脸，杏眼明亮，长黑发微卷披在肩头。
+身穿复古蓝色旗袍，花卉刺绣细节清晰，裙摆到鞋子完整可见。
+人物直立站姿，居中构图，镜头距离足够远，身体上下留有少量空白，干净浅色背景。
+气质自信温婉，高质量角色设定图，统一美术风格。
+不要半身照、胸像、头像、近景、特写、坐姿、蹲姿、趴卧、被遮挡、裁切头部、裁切手臂、裁切腿部、裁切脚部、裁切衣摆、多人、文字、标签、水印。
 ```

@@ -50,13 +50,15 @@ function buildCharacterReferencePrompt(char: any) {
   ].filter(Boolean).join('，')
   return [
     base || `${char.name}，人物角色参考图`,
-    '全身照片，完整从头到脚入镜，人物站立，居中构图',
-    '单人，清晰正面或三分之二侧身，五官清楚，表情自然中性，站姿稳定，双手自然',
+    '单人全身角色立绘，完整人物从头顶到脚底全部进入画面，头发、脸、上半身、双手、腿、脚踝、鞋子都必须清楚可见',
+    '人物直立站姿，居中构图，镜头距离足够远，身体上下留有少量空白，不裁切头部、手臂、腿部、脚部或衣摆',
+    '清晰正面或三分之二侧身，五官清楚，表情自然中性，站姿稳定，双手自然',
     '完整展示发型、发色、年龄感、身高体态、服装、国籍/地域气质、标志性配饰',
-    '干净浅色摄影棚背景，人物设定照，真实摄影质感',
-    '不要生成设定卡，不要任何文字，不要标签，不要水印，不要海报排版，不要多人',
+    '干净浅色纯色背景，人物设定图，按照项目视觉风格渲染',
+    '不要生成半身照、胸像、头像、近景、特写、坐姿、蹲姿、趴卧、被遮挡、多人',
+    '不要生成设定卡，不要任何文字，不要标签，不要水印，不要海报排版',
     '不要剧情动作，不要昏迷、受伤、倒地、哭泣、面容模糊',
-    '高质量全身人物定妆照',
+    '高质量头到脚全身人物设定图',
   ].join('，')
 }
 
@@ -171,7 +173,7 @@ app.post('/:id/generate-voice-sample', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
   if (!char) return badRequest(c, 'Character not found')
-  if (!char.voiceStyle) return badRequest(c, '请先分配音色')
+  if (!char.voiceStyle) return badRequest(c, '请先完成角色声音设计')
   if (!body.episode_id) return badRequest(c, 'episode_id is required')
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
@@ -179,7 +181,8 @@ app.post('/:id/generate-voice-sample', async (c) => {
 
   try {
     logTaskStart('VoiceSample', 'generate', { characterId: id, characterName: char.name, episodeId: ep.id, voice: char.voiceStyle })
-    const audioPath = await generateVoiceSample(char.name, char.voiceStyle, ep.audioConfigId ?? undefined)
+    const configId = body.config_id ? Number(body.config_id) : (ep.audioConfigId ?? undefined)
+    const audioPath = await generateVoiceSample(char.name, char.voiceStyle, configId)
     db.update(schema.characters)
       .set({ voiceSampleUrl: audioPath, updatedAt: now() })
       .where(eq(schema.characters.id, id)).run()
@@ -189,6 +192,28 @@ app.post('/:id/generate-voice-sample', async (c) => {
     logTaskError('VoiceSample', 'generate', { characterId: id, error: err.message })
     return badRequest(c, `TTS 生成失败: ${err.message}`)
   }
+})
+
+// POST /characters/:id/upload-voice-sample — 上传并设为当前角色声音样本
+app.post('/:id/upload-voice-sample', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  if (!char) return badRequest(c, 'Character not found')
+  const body = await c.req.parseBody()
+  const file = body['file']
+  if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+
+  const buffer = await file.arrayBuffer()
+  const localPath = await saveUploadedFile(buffer, 'audio', file.name)
+  db.update(schema.characters)
+    .set({
+      voiceSampleUrl: localPath,
+      voiceProvider: char.voiceProvider || 'uploaded',
+      updatedAt: now(),
+    })
+    .where(eq(schema.characters.id, id))
+    .run()
+  return success(c, { voice_sample_url: localPath })
 })
 
 // POST /characters/:id/generate-image
@@ -233,6 +258,7 @@ app.post('/batch-generate-images', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
   const results: number[] = []
+  const items: Array<{ character_id: number; image_generation_id: number }> = []
   for (const cid of ids) {
     const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, cid)).all()
     if (!char) continue
@@ -241,10 +267,11 @@ app.post('/batch-generate-images', async (c) => {
       const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, char.dramaId)).all()
       const genId = await generateImage({ characterId: cid, dramaId: char.dramaId, prompt, size: orientationImageSize(dramaOrientation(drama)), configId: body.config_id || characterImageConfigId(drama, ep.imageConfigId) })
       results.push(genId)
+      items.push({ character_id: cid, image_generation_id: genId })
     } catch {}
   }
   logTaskSuccess('CharacterImage', 'batch-generate', { episodeId: ep.id, requested: ids.length, started: results.length })
-  return success(c, { count: results.length, ids: results })
+  return success(c, { count: results.length, ids: results, items })
 })
 
 export default app

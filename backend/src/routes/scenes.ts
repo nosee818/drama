@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
+import { saveUploadedFile } from '../utils/storage.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { dramaOrientation, orientationImageSize } from '../utils/aspect.js'
 
@@ -18,11 +19,7 @@ function sceneImageConfigId(drama: any, fallback?: number | null) {
 }
 
 function emptyScenePrompt(prompt: string) {
-  const base = String(prompt || '').trim()
-  const guard = '空场景，纯环境背景，没有任何人物、脸、身体、手、剪影、人群或角色，重点表现空间结构、陈设、光线和氛围，不要文字、签名或水印'
-  if (!base) return guard
-  if (/空场景|无人|无人物|不要出现人物|没有任何人物/.test(base)) return base
-  return `${base}，${guard}`
+  return String(prompt || '').trim()
 }
 
 // POST /scenes
@@ -65,7 +62,7 @@ app.post('/:id/generate-image', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
 
-  const prompt = emptyScenePrompt(scene.prompt || `${scene.location}, ${scene.time || ''}, 高质量场景, 电影感`)
+  const prompt = emptyScenePrompt(scene.prompt || [scene.location, scene.time].filter(Boolean).join('，'))
   try {
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep.id, dramaId: scene.dramaId, location: scene.location })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
@@ -78,6 +75,39 @@ app.post('/:id/generate-image', async (c) => {
     db.update(schema.scenes).set({ status: 'failed', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
     return badRequest(c, err.message)
   }
+})
+
+// POST /scenes/:id/upload-image — 上传并设为当前场景图
+app.post('/:id/upload-image', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [scene] = db.select().from(schema.scenes).where(eq(schema.scenes.id, id)).all()
+  if (!scene) return badRequest(c, 'Scene not found')
+
+  const body = await c.req.parseBody()
+  const file = body['file']
+  if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+
+  const buffer = await file.arrayBuffer()
+  const localPath = await saveUploadedFile(buffer, 'images', file.name)
+  const ts = now()
+  db.insert(schema.imageGenerations).values({
+    dramaId: scene.dramaId,
+    sceneId: id,
+    imageType: 'scene',
+    provider: 'manual',
+    prompt: '用户上传场景图',
+    localPath,
+    imageUrl: localPath,
+    status: 'completed',
+    createdAt: ts,
+    updatedAt: ts,
+    completedAt: ts,
+  }).run()
+  db.update(schema.scenes)
+    .set({ imageUrl: localPath, localPath, status: 'completed', updatedAt: ts })
+    .where(eq(schema.scenes.id, id))
+    .run()
+  return success(c, { image_url: localPath })
 })
 
 // DELETE /scenes/:id

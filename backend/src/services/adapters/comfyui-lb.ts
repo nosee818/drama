@@ -1,6 +1,18 @@
 import type { AIConfig } from './types'
 
-const counters = new Map<string, number>()
+interface ComfyUIEndpointState {
+  active: number
+  selected: number
+}
+
+export interface ComfyUIReservation {
+  config: AIConfig
+  baseUrl: string
+  release: () => void
+}
+
+const endpointStates = new Map<string, ComfyUIEndpointState>()
+const poolCursors = new Map<string, number>()
 const TASK_PREFIX = 'huobao-comfyui:'
 
 export function isComfyUIProvider(provider: string) {
@@ -8,25 +20,102 @@ export function isComfyUIProvider(provider: string) {
 }
 
 export function getComfyUIBaseUrls(config: AIConfig) {
+  const seen = new Set<string>()
   return String(config.baseUrl || '')
     .split(/[\s,]+/)
-    .map(item => item.trim())
+    .map(item => normalizeBaseUrl(item))
     .filter(Boolean)
+    .filter((item) => {
+      if (seen.has(item)) return false
+      seen.add(item)
+      return true
+    })
 }
 
 export function selectComfyUIConfig(config: AIConfig) {
-  const urls = getComfyUIBaseUrls(config)
-  if (urls.length <= 1) return { ...config, baseUrl: urls[0] || config.baseUrl }
+  const reservation = reserveComfyUIConfig(config)
+  reservation.release()
+  return reservation.config
+}
 
-  const key = [
-    config.provider,
-    config.endpoint || '',
-    config.queryEndpoint || '',
-    urls.join('|'),
-  ].join('::')
-  const next = counters.get(key) || 0
-  counters.set(key, next + 1)
-  return { ...config, baseUrl: urls[next % urls.length] }
+export function reserveComfyUIConfig(config: AIConfig): ComfyUIReservation {
+  const urls = getComfyUIBaseUrls(config)
+  const candidates = urls.length ? urls : [normalizeBaseUrl(config.baseUrl)]
+  const poolKey = getComfyUIPoolKey(config)
+  const cursor = poolCursors.get(poolKey) || 0
+  const start = cursor % candidates.length
+  const ordered = [...candidates.slice(start), ...candidates.slice(0, start)]
+  const selected = ordered.reduce((best, candidate) => {
+    const bestState = getEndpointState(best)
+    const candidateState = getEndpointState(candidate)
+    if (candidateState.active !== bestState.active) {
+      return candidateState.active < bestState.active ? candidate : best
+    }
+    if (candidateState.selected !== bestState.selected) {
+      return candidateState.selected < bestState.selected ? candidate : best
+    }
+    return best
+  }, ordered[0])
+
+  const selectedIndex = candidates.indexOf(selected)
+  poolCursors.set(poolKey, selectedIndex >= 0 ? selectedIndex + 1 : cursor + 1)
+  retainComfyUIEndpoint(selected)
+  let released = false
+
+  return {
+    config: { ...config, baseUrl: selected },
+    baseUrl: selected,
+    release: () => {
+      if (released) return
+      released = true
+      releaseComfyUIEndpoint(selected)
+    },
+  }
+}
+
+export function retainComfyUIEndpoint(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl)
+  if (!normalized) return () => {}
+  const state = getEndpointState(normalized)
+  state.active += 1
+  state.selected += 1
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseComfyUIEndpoint(normalized)
+  }
+}
+
+function releaseComfyUIEndpoint(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl)
+  if (!normalized) return
+  const state = getEndpointState(normalized)
+  state.active = Math.max(0, state.active - 1)
+}
+
+function getEndpointState(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl)
+  const current = endpointStates.get(normalized)
+  if (current) return current
+  const created = { active: 0, selected: 0 }
+  endpointStates.set(normalized, created)
+  return created
+}
+
+function getComfyUIPoolKey(config: AIConfig) {
+  const settings = config.settings || {}
+  return String(
+    settings.comfyuiPool
+    || settings.comfyui_pool
+    || settings.poolKey
+    || settings.pool_key
+    || 'global',
+  )
+}
+
+function normalizeBaseUrl(value: string | null | undefined) {
+  return String(value || '').trim().replace(/\/+$/, '')
 }
 
 export function encodeComfyUITaskId(taskId: string, baseUrl: string) {

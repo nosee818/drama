@@ -19,7 +19,7 @@ const HUOBAO_AGENT_DEFAULTS = [
   { agentType: 'script_rewriter', name: '剧本改写' },
   { agentType: 'extractor', name: '角色场景提取' },
   { agentType: 'storyboard_breaker', name: '分镜拆解' },
-  { agentType: 'voice_assigner', name: '音色分配' },
+  { agentType: 'voice_assigner', name: '声音设计' },
   { agentType: 'grid_prompt_generator', name: '图片提示词生成' },
 ] as const
 
@@ -74,6 +74,15 @@ function parseSettingsObject(value: any): Record<string, any> {
   }
 }
 
+function renderTemplateObject(template: any, values: Record<string, any>): any {
+  if (Array.isArray(template)) return template.map(item => renderTemplateObject(item, values))
+  if (template && typeof template === 'object') {
+    return Object.fromEntries(Object.entries(template).map(([key, value]) => [key, renderTemplateObject(value, values)]))
+  }
+  if (typeof template !== 'string') return template
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] == null ? '' : String(values[key]))
+}
+
 function splitBaseUrls(baseUrl: string) {
   return String(baseUrl || '')
     .split(/[\s,]+/)
@@ -102,19 +111,35 @@ function buildTextProbePath(endpoint?: string) {
   return clean
 }
 
-function buildMultipartVideoProbe(baseUrl: string, endpoint: string | undefined, apiKey: string | undefined, settings: Record<string, any>) {
+function buildMultipartTaskProbe(serviceType: string, baseUrl: string, endpoint: string | undefined, apiKey: string | undefined, settings: Record<string, any>) {
   const form = new FormData()
   const promptField = settings.promptField || 'prompt'
   const imageField = settings.imageField || 'image'
-  const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
-  const bytes = Uint8Array.from(Buffer.from(samplePng, 'base64'))
-  form.append(promptField, settings.testPrompt || 'Moving clouds')
-  form.append(imageField, new Blob([bytes], { type: 'image/png' }), settings.imageFilename || 'test.png')
+  const values = {
+    prompt: settings.testPrompt || 'Moving clouds',
+    input: settings.testText || '你好，这是声音测试。',
+    text: settings.testText || '你好，这是声音测试。',
+    voice: settings.testVoice || 'test',
+    voice_id: settings.testVoice || 'test',
+    model: settings.testModel || 'test-model',
+    speed: 1,
+    emotion: '',
+  }
+  if (serviceType === 'audio') {
+    form.append(settings.textField || settings.inputField || 'text', values.text)
+    if (settings.voiceField !== false) form.append(settings.voiceField || 'voice', values.voice)
+  } else {
+    const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+    const bytes = Uint8Array.from(Buffer.from(samplePng, 'base64'))
+    form.append(promptField, settings.testPrompt || 'Moving clouds')
+    form.append(imageField, new Blob([bytes], { type: 'image/png' }), settings.imageFilename || 'test.png')
+  }
 
   const formFields = settings.formFields && typeof settings.formFields === 'object' ? settings.formFields : {}
-  for (const [key, value] of Object.entries(formFields)) {
+  const renderedFields = renderTemplateObject(formFields, values)
+  for (const [key, value] of Object.entries(renderedFields)) {
     if (value == null || value === '') continue
-    form.append(key, String(value).replace(/\{\{prompt\}\}/g, settings.testPrompt || 'Moving clouds'))
+    form.append(key, String(value))
   }
 
   return {
@@ -199,8 +224,28 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
     }
   }
 
-  if (serviceType === 'video' && settings.requestType === 'multipart') {
-    return buildMultipartVideoProbe(baseUrl, endpoint, apiKey, settings)
+  if ((serviceType === 'video' || serviceType === 'audio') && settings.requestType === 'multipart') {
+    return buildMultipartTaskProbe(serviceType, baseUrl, endpoint, apiKey, settings)
+  }
+
+  if (serviceType === 'audio' && (p === 'custom' || settings.requestTemplate || settings.responseType)) {
+    const values = {
+      input: settings.testText || '你好，这是声音测试。',
+      text: settings.testText || '你好，这是声音测试。',
+      voice: settings.testVoice || 'test',
+      voice_id: settings.testVoice || 'test',
+      model: model || 'tts-model',
+      speed: 1,
+      emotion: '',
+    }
+    return {
+      method: settings.method || 'POST',
+      url: joinProviderUrl(baseUrl, '', endpoint || settings.endpoint || settings.generatePath || '/v1/audio/speech'),
+      headers: bearerHeaders(apiKey, true),
+      body: settings.requestTemplate && typeof settings.requestTemplate === 'object'
+        ? renderTemplateObject(settings.requestTemplate, values)
+        : { input: values.input, voice: values.voice, model: values.model },
+    }
   }
 
   return {
@@ -377,7 +422,7 @@ app.post('/test', async (c) => {
           method: item.method,
           headers: item.headers,
           body: requestBody,
-          signal: AbortSignal.timeout(settings.requestType === 'multipart' ? 30000 : 8000),
+          signal: AbortSignal.timeout(Number(settings.testTimeoutMs || settings.timeoutMs || settings.timeout_ms || (settings.requestType === 'multipart' ? 30000 : 8000))),
         })
         const text = await resp.text()
         const reachable = settings.requestType === 'multipart'

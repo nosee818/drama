@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { success, badRequest } from '../utils/response.js'
+import { getActiveAgentSkill, listActiveAgentSkills, setActiveAgentSkill } from '../agents/skills.js'
 
 const app = new Hono()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -40,6 +41,32 @@ app.get('/', async (c) => {
 
   scanDir(SKILLS_DIR)
   return success(c, skills)
+})
+
+// GET /skills/active — active skill map by Agent
+app.get('/active', async (c) => {
+  return success(c, listActiveAgentSkills())
+})
+
+// GET /skills/active/:agentType — active skill for one Agent
+app.get('/active/:agentType', async (c) => {
+  const agentType = c.req.param('agentType')
+  return success(c, {
+    agent_type: agentType,
+    skill_id: getActiveAgentSkill(agentType),
+  })
+})
+
+// PUT /skills/active/:agentType — select active skill for one Agent
+app.put('/active/:agentType', async (c) => {
+  const agentType = c.req.param('agentType')
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const skillId = setActiveAgentSkill(agentType, body.skill_id)
+    return success(c, { agent_type: agentType, skill_id: skillId })
+  } catch (err: any) {
+    return badRequest(c, err.message)
+  }
 })
 
 // GET /skills/:id — Get skill content

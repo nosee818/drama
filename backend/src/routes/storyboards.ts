@@ -3,7 +3,8 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
-import { generateTTS } from '../services/tts-generation.js'
+import { generateTTS, voiceSampleText } from '../services/tts-generation.js'
+import { saveUploadedFile } from '../utils/storage.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -154,6 +155,7 @@ app.put('/:id', async (c) => {
 // POST /storyboards/:id/generate-tts
 app.post('/:id/generate-tts', async (c) => {
   const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({}))
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
   if (!sb) return badRequest(c, '镜头不存在')
   const parsedDialogue = parseDialogueForTTS(sb.dialogue)
@@ -170,16 +172,16 @@ app.post('/:id/generate-tts', async (c) => {
   })
 
   let voiceId = 'alloy'
+  let speakerCharacter: any = null
   const speaker = parsedDialogue.speaker
 
   if (speaker) {
-    if (!/^(旁白|画外音|narrator)$/i.test(speaker)) {
-      const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-      if (ep) {
-        const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
-        const found = chars.find((char) => char.name === speaker)
-        if (found?.voiceStyle) voiceId = found.voiceStyle
-      }
+    const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+    if (ep) {
+      const chars = db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId)).all()
+      const found = chars.find((char) => char.name === speaker)
+      if (found) speakerCharacter = found
+      if (found?.voiceStyle) voiceId = found.voiceStyle
     }
   }
 
@@ -188,7 +190,18 @@ app.post('/:id/generate-tts', async (c) => {
 
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
   try {
-    const audioPath = await generateTTS({ text: pureDialogue, voice: voiceId, configId: ep?.audioConfigId || null })
+    if (speakerCharacter?.voiceProvider === 'custom-design' && !speakerCharacter.voiceSampleUrl) {
+      return badRequest(c, `角色「${speakerCharacter.name}」已有声音设计，但还没有声音样本。请先生成或上传角色声音样本。`)
+    }
+    const audioPath = await generateTTS({
+      text: pureDialogue,
+      voice: voiceId,
+      purpose: speakerCharacter?.voiceSampleUrl ? 'clone' : undefined,
+      instruct: speakerCharacter?.voiceStyle || voiceId,
+      refText: speakerCharacter ? voiceSampleText(speakerCharacter.name) : undefined,
+      referenceAudioUrl: speakerCharacter?.voiceSampleUrl || null,
+      configId: body.config_id ? Number(body.config_id) : (ep?.audioConfigId || null),
+    })
   db.update(schema.storyboards)
     .set({ ttsAudioUrl: audioPath, updatedAt: now() })
     .where(eq(schema.storyboards.id, id))
@@ -205,6 +218,81 @@ app.post('/:id/generate-tts', async (c) => {
     logTaskError('StoryboardAPI', 'generate-tts', { storyboardId: id, voiceId, error: err.message })
     return badRequest(c, err.message)
   }
+})
+
+// POST /storyboards/:id/upload-frame — 上传首帧/尾帧并绑定到镜头
+app.post('/:id/upload-frame', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return badRequest(c, '镜头不存在')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.parseBody()
+  const file = body['file']
+  const frameType = String(body['frame_type'] || body['frameType'] || 'first_frame')
+  if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+  if (!['first_frame', 'last_frame'].includes(frameType)) return badRequest(c, 'frame_type must be first_frame or last_frame')
+
+  const buffer = await file.arrayBuffer()
+  const localPath = await saveUploadedFile(buffer, 'images', file.name)
+  const ts = now()
+  db.insert(schema.imageGenerations).values({
+    dramaId: ep.dramaId,
+    storyboardId: id,
+    imageType: 'storyboard',
+    frameType,
+    provider: 'manual',
+    prompt: frameType === 'first_frame' ? '用户上传镜头首帧' : '用户上传镜头尾帧',
+    imageUrl: localPath,
+    localPath,
+    status: 'completed',
+    createdAt: ts,
+    updatedAt: ts,
+    completedAt: ts,
+  }).run()
+  const updates: Record<string, any> = { updatedAt: ts }
+  if (frameType === 'first_frame') updates.firstFrameImage = localPath
+  else updates.lastFrameImage = localPath
+  db.update(schema.storyboards).set(updates).where(eq(schema.storyboards.id, id)).run()
+  return success(c, frameType === 'first_frame' ? { first_frame_image: localPath } : { last_frame_image: localPath })
+})
+
+// POST /storyboards/:id/upload-video — 上传镜头视频并绑定到镜头
+app.post('/:id/upload-video', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
+  if (!sb) return badRequest(c, '镜头不存在')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.parseBody()
+  const file = body['file']
+  if (!file || !(file instanceof File)) return badRequest(c, 'file is required')
+
+  const buffer = await file.arrayBuffer()
+  const localPath = await saveUploadedFile(buffer, 'videos', file.name)
+  const ts = now()
+  db.insert(schema.videoGenerations).values({
+    dramaId: ep.dramaId,
+    storyboardId: id,
+    provider: 'manual',
+    prompt: '用户上传镜头视频',
+    videoUrl: localPath,
+    localPath,
+    status: 'completed',
+    duration: sb.duration || undefined,
+    createdAt: ts,
+    updatedAt: ts,
+    completedAt: ts,
+  }).run()
+  db.update(schema.storyboards)
+    .set({ videoUrl: localPath, updatedAt: ts })
+    .where(eq(schema.storyboards.id, id))
+    .run()
+  return success(c, { video_url: localPath })
 })
 
 // DELETE /storyboards/:id

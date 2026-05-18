@@ -3,6 +3,7 @@ import { eq, isNull, and } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
+import { getStylePromptConfig, saveStylePromptConfig } from '../services/style-prompts.js'
 
 const app = new Hono()
 
@@ -11,6 +12,19 @@ app.get('/', async (c) => {
   const rows = db.select().from(schema.agentConfigs)
     .where(isNull(schema.agentConfigs.deletedAt)).all()
   return success(c, toSnakeCaseArray(rows))
+})
+
+// GET /agent-configs/style-prompts
+app.get('/style-prompts', async (c) => {
+  return success(c, { items: getStylePromptConfig() })
+})
+
+// PUT /agent-configs/style-prompts
+app.put('/style-prompts', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const items = Array.isArray(body.items) ? body.items : []
+  if (!items.length) return badRequest(c, 'items required')
+  return success(c, { items: saveStylePromptConfig(items) })
 })
 
 // GET /agent-configs/:id

@@ -23,7 +23,8 @@ function toAbsPath(relativePath: string): string {
 
 /**
  * 拼接一集的所有镜头视频。
- * 有配音合成片段时优先使用 composedVideoUrl；没有配音的镜头直接使用 videoUrl。
+ * 优先使用配音合成阶段输出的 composedVideoUrl；它会保证有台词只含 TTS 音轨，无台词为静音。
+ * 如果用户还没执行视频配音合成，则退回使用原始 videoUrl。
  */
 export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Promise<number> {
   const storyboards = db.select().from(schema.storyboards)
@@ -31,7 +32,7 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number): Pr
     .orderBy(schema.storyboards.storyboardNumber)
     .all()
 
-  const selectMergeSource = (sb: any) => sb.ttsAudioUrl && sb.composedVideoUrl ? sb.composedVideoUrl : sb.videoUrl
+  const selectMergeSource = (sb: any) => sb.composedVideoUrl || sb.videoUrl
   const readyStoryboards = storyboards.filter(sb => !!selectMergeSource(sb))
   if (readyStoryboards.length !== storyboards.length) {
     throw new Error(`Only storyboards with generated video can be merged (${readyStoryboards.length}/${storyboards.length} ready)`)
