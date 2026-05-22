@@ -136,6 +136,23 @@ export const storyboardCharacters = sqliteTable('storyboard_characters', {
   pk: primaryKey({ columns: [table.storyboardId, table.characterId] }),
 }))
 
+export const storyboardDubbings = sqliteTable('storyboard_dubbings', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  episodeId: integer('episode_id').notNull(),
+  storyboardId: integer('storyboard_id').notNull(),
+  characterId: integer('character_id'),
+  speakerName: text('speaker_name'),
+  voiceId: text('voice_id'),
+  text: text('text').notNull(),
+  sortOrder: integer('sort_order').default(1),
+  audioUrl: text('audio_url'),
+  subtitleUrl: text('subtitle_url'),
+  status: text('status').default('pending'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+})
+
 export const aiServiceConfigs = sqliteTable('ai_service_configs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   serviceType: text('service_type').notNull(),

@@ -41,16 +41,42 @@ function getEpisodeCharacterIds(episodeId: number) {
   )
 }
 
+function cleanDialogueContent(value: string) {
+  return value.replace(/^[：:\s]+/, '').trim()
+}
+
+function parseStructuredDialogue(dialogue?: string | null) {
+  const raw = String(dialogue || '').trim()
+  if (!raw) return null
+
+  const monologue = raw.match(/^[（(]\s*([^（）()：:\n]{1,24})\s*(?:独白说|独白|内心独白|内心OS|OS|心声|画外音|旁白)\s*[）)]\s*[：:]+\s*(.+)$/s)
+  if (monologue) {
+    return {
+      speaker: normalizeDialogueSpeakerName(monologue[1]),
+      content: cleanDialogueContent(monologue[2]),
+      isMonologue: true,
+    }
+  }
+
+  const explicit = raw.match(/^([^：:\n]{1,24})[：:]+\s*(.+)$/s)
+  if (explicit) {
+    return {
+      speaker: normalizeDialogueSpeakerName(stripSpeakerDecorations(explicit[1])),
+      content: cleanDialogueContent(explicit[2]),
+      isMonologue: false,
+    }
+  }
+
+  return null
+}
+
 function extractDialogueSpeakers(dialogue?: string | null) {
   if (!dialogue) return []
   const speakers: string[] = []
   for (const line of dialogue.split(/\n+/)) {
-    const match = line.trim().match(/^([^：:]{1,24})[：:]/)
-    if (!match) continue
-    const speaker = match[1]
-      .replace(/[（(].*?[）)]/g, '')
-      .replace(/[《》「」“”"'\s]/g, '')
-      .trim()
+    const parsed = parseStructuredDialogue(line)
+    if (!parsed) continue
+    const speaker = parsed.speaker
     if (isValidDialogueSpeaker(speaker)) speakers.push(normalizeDialogueSpeakerName(speaker))
   }
   return [...new Set(speakers)]
@@ -65,6 +91,10 @@ function normalizeDialogueSpeakerName(name: string) {
   return cleaned
 }
 
+function isGenericNarratorSpeaker(name: string) {
+  return /^(旁白|画外音|narrator|voiceover)$/i.test(normalizeDialogueSpeakerName(name))
+}
+
 function isValidDialogueSpeaker(name: string) {
   const cleaned = normalizeDialogueSpeakerName(name)
   if (!cleaned) return false
@@ -72,6 +102,38 @@ function isValidDialogueSpeaker(name: string) {
   if (cleaned.length > 12) return false
   if (/[，。！？!?；;]/.test(cleaned)) return false
   return true
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function storyboardBoundCharacters(sb: Record<string, any>, characterById: Map<number, any>) {
+  return (sb.character_ids || [])
+    .map((id: number) => characterById.get(Number(id)))
+    .filter(Boolean)
+    .filter((char: any) => !/旁白|画外音|声音角色|系统音/.test(`${char.name || ''} ${char.role || ''}`))
+}
+
+function inferNarratorOwner(sb: Record<string, any>, characterById: Map<number, any>) {
+  const boundCharacters = storyboardBoundCharacters(sb, characterById)
+  if (boundCharacters.length === 1) return boundCharacters[0]
+
+  const text = [
+    sb.dialogue,
+    sb.description,
+    sb.action,
+    sb.title,
+    sb.result,
+  ].filter(Boolean).join('\n')
+
+  return boundCharacters.find((char: any) => {
+    const name = escapeRegExp(String(char.name || ''))
+    if (!name) return false
+    const nameFirst = new RegExp(`${name}[^。！？!?\n]{0,12}(独白|内心|心声|画外音|旁白)`)
+    const cueFirst = new RegExp(`(独白|内心|心声|画外音|旁白)[^。！？!?\n]{0,12}${name}`)
+    return nameFirst.test(text) || cueFirst.test(text)
+  }) || null
 }
 
 function shouldCreateVoiceOnlyCharacter(name: string) {
@@ -175,21 +237,24 @@ function normalizeStoryboardDialogue(sb: Record<string, any>, characterById: Map
       : `系统音：${raw.replace(/^系统音[：:]\s*/, '').trim()}`
   }
 
-  const explicit = raw.match(/^([^：:\n]{1,24})[：:]\s*(.+)$/s)
+  const explicit = parseStructuredDialogue(raw)
   if (explicit) {
-    const speaker = normalizeDialogueSpeakerName(stripSpeakerDecorations(explicit[1]))
-    if (isValidDialogueSpeaker(speaker)) return `${speaker}：${explicit[2].trim()}`
+    const speaker = explicit.speaker
+    if (isValidDialogueSpeaker(speaker)) {
+      if (isGenericNarratorSpeaker(speaker)) {
+        const narratorOwner = inferNarratorOwner(sb, characterById)
+        if (narratorOwner?.name) return `${narratorOwner.name}：${explicit.content}`
+      }
+      return `${speaker}：${explicit.content}`
+    }
   }
 
   const byDescription = inferSpeakerFromDescription(sb.description, characterNames)
-  if (byDescription) return `${byDescription}：${raw.replace(/^（.+?）\s*/, '').trim()}`
+  if (byDescription) return `${byDescription}：${cleanDialogueContent(raw.replace(/^（.+?）\s*/, ''))}`
 
-  const boundCharacters = (sb.character_ids || [])
-    .map((id: number) => characterById.get(Number(id)))
-    .filter(Boolean)
-    .filter((char: any) => !/旁白|画外音|声音角色|系统音/.test(`${char.name || ''} ${char.role || ''}`))
+  const boundCharacters = storyboardBoundCharacters(sb, characterById)
   if (boundCharacters.length === 1) {
-    return `${boundCharacters[0].name}：${raw.replace(/^（.+?）\s*/, '').trim()}`
+    return `${boundCharacters[0].name}：${cleanDialogueContent(raw.replace(/^（.+?）\s*/, ''))}`
   }
 
   return raw

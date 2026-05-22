@@ -62,6 +62,39 @@ function buildCharacterReferencePrompt(char: any) {
   ].join('，')
 }
 
+// POST /characters — 手动新增角色/声音角色
+app.post('/', async (c) => {
+  const body = await c.req.json()
+  const dramaId = Number(body.drama_id || body.dramaId || 0)
+  const name = String(body.name || '').trim()
+  if (!dramaId) return badRequest(c, 'drama_id is required')
+  if (!name) return badRequest(c, '角色名称不能为空')
+  const ts = now()
+  const res = db.insert(schema.characters).values({
+    dramaId,
+    name,
+    role: body.role || '',
+    description: body.description || '',
+    appearance: body.appearance || '',
+    personality: body.personality || '',
+    voiceStyle: body.voice_style || body.voiceStyle || '',
+    voiceProvider: body.voice_provider || body.voiceProvider || 'manual',
+    sortOrder: Number(body.sort_order || body.sortOrder || 0) || null,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+  const id = Number(res.lastInsertRowid)
+  if (body.episode_id || body.episodeId) {
+    db.insert(schema.episodeCharacters).values({
+      episodeId: Number(body.episode_id || body.episodeId),
+      characterId: id,
+      createdAt: ts,
+    }).run()
+  }
+  const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, id)).all()
+  return success(c, char)
+})
+
 // PUT /characters/:id
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))

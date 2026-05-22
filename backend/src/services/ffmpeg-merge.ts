@@ -21,6 +21,48 @@ function toAbsPath(relativePath: string): string {
   return path.join(STORAGE_ROOT, relativePath)
 }
 
+function hasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        resolve(false)
+        return
+      }
+      resolve((metadata.streams || []).some((stream: any) => stream.codec_type === 'audio'))
+    })
+  })
+}
+
+async function normalizeMergeClip(inputPath: string, tempDir: string): Promise<string> {
+  const outputPath = path.join(tempDir, `${uuid()}-merge-ready.mp4`)
+  const sourceHasAudio = await hasAudioStream(inputPath)
+  await new Promise<void>((resolve, reject) => {
+    let cmd = ffmpeg(inputPath)
+    if (!sourceHasAudio) {
+      cmd = cmd.input('anullsrc=channel_layout=stereo:sample_rate=48000')
+        .inputFormat('lavfi')
+    }
+
+    const audioMap = sourceHasAudio ? '0:a:0' : '1:a'
+    cmd.outputOptions([
+        '-map', '0:v',
+        '-map', audioMap,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-ac', '2',
+        '-b:a', '192k',
+        '-shortest',
+        '-movflags', '+faststart',
+      ])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+  return outputPath
+}
+
 /**
  * 拼接一集的所有镜头视频。
  * 优先使用配音合成阶段输出的 composedVideoUrl；它会保证有台词只含 TTS 音轨，无台词为静音。
@@ -76,10 +118,9 @@ async function doMerge(mergeId: number, episodeId: number, videos: string[]) {
   const listDir = path.join(STORAGE_ROOT, 'temp')
   fs.mkdirSync(listDir, { recursive: true })
   const listPath = path.join(listDir, `${uuid()}.txt`)
+  const temporaryVideos = await Promise.all(videos.map(v => normalizeMergeClip(toAbsPath(v), listDir)))
 
-  const listContent = videos
-    .map(v => `file '${toAbsPath(v)}'`)
-    .join('\n')
+  const listContent = temporaryVideos.map(v => `file '${v}'`).join('\n')
   fs.writeFileSync(listPath, listContent, 'utf-8')
 
   // 输出文件
@@ -110,6 +151,9 @@ async function doMerge(mergeId: number, episodeId: number, videos: string[]) {
 
   // 清理临时文件
   fs.unlinkSync(listPath)
+  temporaryVideos.forEach(file => {
+    try { fs.unlinkSync(file) } catch {}
+  })
 
   // 获取时长
   const duration = await getVideoDuration(outputPath)

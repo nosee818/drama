@@ -156,6 +156,29 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_storyboard_characters_character_id
     ON storyboard_characters (character_id);
 
+  CREATE TABLE IF NOT EXISTS storyboard_dubbings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    storyboard_id INTEGER NOT NULL,
+    character_id INTEGER,
+    speaker_name TEXT,
+    voice_id TEXT,
+    text TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 1,
+    audio_url TEXT,
+    subtitle_url TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_storyboard_dubbings_episode_id
+    ON storyboard_dubbings (episode_id);
+  CREATE INDEX IF NOT EXISTS idx_storyboard_dubbings_storyboard_id
+    ON storyboard_dubbings (storyboard_id);
+  CREATE INDEX IF NOT EXISTS idx_storyboard_dubbings_character_id
+    ON storyboard_dubbings (character_id);
+
   CREATE TABLE IF NOT EXISTS ai_service_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     service_type TEXT NOT NULL,

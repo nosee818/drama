@@ -13,6 +13,7 @@ import { joinProviderUrl } from './adapters/url.js'
 import type { AIConfig, ProviderRequest } from './adapters/types'
 import { configForComfyUITask, encodeComfyUITaskId, isComfyUIProvider, reserveComfyUIConfig, retainComfyUIEndpoint, selectComfyUIConfig } from './adapters/comfyui-lb'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { applyDramaStylePrompt } from './style-prompts.js'
 
 const genericVideoCounters = new Map<string, number>()
 const videoServerActiveUrls = new Map<string, Set<string>>()
@@ -46,6 +47,7 @@ interface GenerateVideoParams {
   aspectRatio?: string
   width?: number
   height?: number
+  fps?: number
   configId?: number
 }
 
@@ -87,6 +89,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     ? getConfigById(params.configId)
     : getActiveConfig('video')
   if (!config) throw new Error('No active video AI config')
+  const finalPrompt = applyDramaStylePrompt(params.dramaId, params.prompt)
   const caps = videoReferenceCapabilities(config)
   let referenceMode = params.referenceMode || 'none'
   let imageUrl = params.imageUrl
@@ -111,7 +114,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
   const res = db.insert(schema.videoGenerations).values({
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
-    prompt: params.prompt,
+    prompt: finalPrompt,
     model: params.model || config.model,
     provider: config.provider,
     referenceMode,
@@ -123,6 +126,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     aspectRatio: params.aspectRatio || '16:9',
     width: params.width,
     height: params.height,
+    fps: params.fps,
     status: 'pending',
     createdAt: ts,
     updatedAt: ts,
@@ -145,6 +149,7 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
       baseUrl: config.baseUrl,
     },
     params,
+    finalPrompt,
   })
   processVideoGeneration(lastId, config).catch(err => {
     logTaskError('VideoTask', 'process', { id: lastId, error: err.message })
@@ -583,8 +588,13 @@ async function pollVideoTask(id: number, config: AIConfig, taskId: string, story
           return
         }
         if (pollResp.status === 'failed') {
-          logTaskError('VideoTask', 'poll-failed', { id, taskId, error: pollResp.error || 'Video generation failed' })
-          throw new Error(pollResp.error || 'Video generation failed')
+          const error = pollResp.error || 'Video generation failed'
+          logTaskError('VideoTask', 'poll-failed', { id, taskId, error })
+          db.update(schema.videoGenerations)
+            .set({ status: 'failed', errorMsg: error, updatedAt: now() })
+            .where(eq(schema.videoGenerations.id, id))
+            .run()
+          return
         }
       } catch (err: any) {
         if (i === 299) {

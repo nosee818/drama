@@ -61,19 +61,57 @@ function videoReferenceCapabilities(config: any) {
   }
 }
 
+function firstFiniteNumber(...values: any[]) {
+  for (const value of values) {
+    const num = Number(value)
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  return null
+}
+
+function configuredVideoSize(config: any, orientation: string) {
+  const settings = safeSettings(config)
+  const resolution = String(settings.videoResolution ?? settings.video_resolution ?? settings.resolution ?? '').toLowerCase()
+  const preset = resolution === '720p' || resolution === '720'
+    ? { width: 1280, height: 720 }
+    : resolution === '1080p' || resolution === '1080'
+      ? { width: 1920, height: 1080 }
+      : null
+  const width = firstFiniteNumber(preset?.width, settings.defaultWidth, settings.default_width, settings.videoWidth, settings.video_width, settings.width)
+  const height = firstFiniteNumber(preset?.height, settings.defaultHeight, settings.default_height, settings.videoHeight, settings.video_height, settings.height)
+  if (!width || !height) {
+    if (String(config?.provider || '').toLowerCase().startsWith('comfyui')) {
+      return orientation === 'landscape' ? '1920x1080' : '1080x1920'
+    }
+    return orientationVideoSize(orientation)
+  }
+
+  const wide = Math.max(width, height)
+  const narrow = Math.min(width, height)
+  return orientation === 'landscape' ? `${wide}x${narrow}` : `${narrow}x${wide}`
+}
+
 // POST /videos — Generate video
+function configuredVideoFps(config: any) {
+  const settings = safeSettings(config)
+  return firstFiniteNumber(settings.fps, settings.defaultFps, settings.default_fps, settings.frameRate, settings.frame_rate)
+}
+
 app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.prompt) return badRequest(c, 'prompt is required')
 
   try {
     let configId: number | undefined = body.config_id
+    const hasExplicitConfigId = body.config_id != null && body.config_id !== ''
     let config: any = null
+    let storyboard: any = null
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
+      storyboard = sb
       if (sb) {
         const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-        if (ep?.videoConfigId != null) configId = ep.videoConfigId
+        if (!hasExplicitConfigId && ep?.videoConfigId != null) configId = ep.videoConfigId
       }
     }
     if (configId) {
@@ -93,6 +131,10 @@ app.post('/', async (c) => {
     let firstFrameUrl = body.first_frame_url
     let lastFrameUrl = body.last_frame_url
     let referenceImageUrls = Array.isArray(body.reference_image_urls) ? body.reference_image_urls.filter(Boolean) : undefined
+    if (storyboard && !imageUrl && !firstFrameUrl && !referenceImageUrls?.length) {
+      firstFrameUrl = storyboard.firstFrameImage || storyboard.composedImage || null
+      if (firstFrameUrl) referenceMode = 'single'
+    }
     if (referenceMode === 'first_last' && !caps.supportsFirstLast) {
       referenceMode = firstFrameUrl || imageUrl ? 'single' : (referenceImageUrls?.length ? 'single' : 'none')
       imageUrl = firstFrameUrl || imageUrl || referenceImageUrls?.[0]
@@ -117,7 +159,8 @@ app.post('/', async (c) => {
     logTaskPayload('VideoAPI', 'request body', body)
     const drama = getDramaForVideoRequest(body)
     const orientation = dramaOrientation(drama)
-    const size = parseSize(body.size || orientationVideoSize(orientation), '1280x720')
+    const size = parseSize(body.size || configuredVideoSize(config, orientation), '1280x720')
+    const fps = firstFiniteNumber(body.fps, configuredVideoFps(config))
     const id = await generateVideo({
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
@@ -132,6 +175,7 @@ app.post('/', async (c) => {
       aspectRatio: body.aspect_ratio || orientationAspectRatio(orientation),
       width: Number(body.width || size.width),
       height: Number(body.height || size.height),
+      fps: fps || undefined,
       configId,
     })
 

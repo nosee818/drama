@@ -33,13 +33,13 @@ export const defaultStylePrompts: StylePromptItem[] = [
   {
     key: 'anime',
     label: '动漫',
-    prompt: '高质量动漫番剧风格，二次元画面风格，干净线稿，精致赛璐璐上色，柔和阴影，动漫电影分镜质感，保持画面和场景为动画绘制效果，不要真人摄影质感，不要文字、水印',
+    prompt: '高质量动漫番剧风格，二次元角色设计，干净线稿，精致赛璐璐上色，柔和阴影，动漫电影分镜质感，保持人物和场景为动画绘制效果，不要真人摄影质感，不要文字、水印',
     builtIn: true,
   },
   {
     key: 'ghibli',
     label: '吉卜力',
-    prompt: '温暖手绘动画电影风格，柔和自然光，细腻背景美术，水彩感色彩，画面温柔、有空气感、童话现实主义，不要真人摄影质感，不要文字、水印',
+    prompt: '温暖手绘动画电影风格，柔和自然光，细腻背景美术，水彩感色彩，人物表情朴素真实，画面温柔、有空气感、童话现实主义，不要真人摄影质感，不要文字、水印',
     builtIn: true,
   },
   {
@@ -51,7 +51,7 @@ export const defaultStylePrompts: StylePromptItem[] = [
   {
     key: 'comic',
     label: '漫画',
-    prompt: '高质量漫画插画风格，清晰线条，戏剧化构图，块面阴影，强烈视觉张力，画面像精修漫画分镜，不要真人摄影质感，不要文字、水印、对白气泡',
+    prompt: '高质量漫画插画风格，清晰线条，戏剧化构图，块面阴影，强烈视觉张力，角色轮廓明确，画面像精修漫画分镜，不要真人摄影质感，不要文字、水印、对白气泡',
     builtIn: true,
   },
   {
@@ -165,5 +165,5 @@ export function applyDramaStylePrompt(dramaId: number | null | undefined, prompt
   const stylePrompt = getStylePromptForDrama(drama)
   if (!stylePrompt) return base
   if (!base) return stylePrompt
-  return `${stylePrompt}。${base}`
+  return `${base}。${stylePrompt}`
 }

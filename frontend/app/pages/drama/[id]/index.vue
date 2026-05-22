@@ -713,9 +713,8 @@ function episodeAutoJob(ep) {
 
 function configLabel(config) {
   if (!config) return ''
-  let modelName = ''
-  try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
-  return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
+  const name = config.name || config.provider || '\u672a\u547d\u540d\u914d\u7f6e'
+  return config.provider ? `${name} · ${config.provider}` : name
 }
 
 function configSettings(config) {

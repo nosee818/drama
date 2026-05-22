@@ -403,8 +403,19 @@
               <span class="field-label">最多参考图</span>
               <input v-model.number="cfgForm.maxReferenceImages" class="input" type="number" min="1" max="12" />
             </label>
+            <label class="field capability-number">
+              <span class="field-label">默认清晰度</span>
+              <select v-model="cfgForm.videoResolution" class="input">
+                <option value="1080p">1080P</option>
+                <option value="720p">720P</option>
+              </select>
+            </label>
+            <label class="field capability-number">
+              <span class="field-label">默认帧率</span>
+              <input v-model.number="cfgForm.videoFps" class="input" type="number" min="1" max="120" />
+            </label>
           </div>
-          <span class="field-hint">WAN/LTX 一般保持单图：不勾选、多参考图数量为 1。即梦/Seedance 等支持多图时勾选并填写数量。</span>
+          <span class="field-hint">WAN/LTX 一般保持单图：不勾选、多参考图数量为 1。1080P 横屏为 1920x1080、竖屏为 1080x1920；720P 横屏为 1280x720、竖屏为 720x1280。</span>
         </div>
         <label class="field">
           <span class="field-label">高级 JSON 配置</span>
@@ -533,6 +544,8 @@ const cfgForm = reactive({
   supportsFirstLast: false,
   supportsMultipleReferences: false,
   maxReferenceImages: 1,
+  videoResolution: '1080p',
+  videoFps: 25,
   textTimeoutMinutes: 20,
 })
 const huobaoForm = reactive({ apiKey: '' })
@@ -564,7 +577,7 @@ const providerPresets = {
     vidu: { label: 'Vidu 推荐', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
     ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'] },
     custom: { label: '通用任务 API', baseUrl: 'https://api.example.com', models: ['video-model'], endpoint: '/v1/videos/generations', queryEndpoint: '/v1/videos/tasks/{taskId}' },
-    comfyui: { label: 'ComfyUI 工作流', baseUrl: 'http://127.0.0.1:8188', models: ['workflow'], endpoint: '/prompt', queryEndpoint: '/history/{taskId}', settings: { workflow: {} } },
+    comfyui: { label: 'ComfyUI 工作流', baseUrl: 'http://127.0.0.1:8188', models: ['workflow'], endpoint: '/prompt', queryEndpoint: '/history/{taskId}', settings: { workflow: {}, videoResolution: '1080p', defaultWidth: 1920, defaultHeight: 1080, fps: 25, autoFillVideoParams: true } },
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
@@ -624,6 +637,21 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.round(num)))
 }
 
+function videoResolutionSize(resolution) {
+  return resolution === '720p'
+    ? { width: 1280, height: 720 }
+    : { width: 1920, height: 1080 }
+}
+
+function inferVideoResolution(settings = {}) {
+  const explicit = String(settings.videoResolution ?? settings.video_resolution ?? settings.resolution ?? '').toLowerCase()
+  if (explicit === '720p' || explicit === '720') return '720p'
+  if (explicit === '1080p' || explicit === '1080') return '1080p'
+  const width = Number(settings.defaultWidth ?? settings.default_width ?? settings.videoWidth ?? settings.video_width ?? settings.width)
+  const height = Number(settings.defaultHeight ?? settings.default_height ?? settings.videoHeight ?? settings.video_height ?? settings.height)
+  return Math.max(width || 0, height || 0) <= 1280 ? '720p' : '1080p'
+}
+
 const endpointHint = computed(() => {
   const provider = cfgForm.provider
   const base = (cfgForm.base_url || 'https://...').split(/[\n,]+/).map(item => item.trim()).filter(Boolean)[0] || 'https://...'
@@ -649,7 +677,7 @@ const settingsHint = computed(() => {
   if (cfgForm.service_type === 'audio') {
     return '音频支持 {{text}}、{{voice}}、{{model}}、{{speed}}、{{emotion}}。通用任务 API 可同步返回 file/json，也可返回 task_id 并按查询端点轮询；ComfyUI 使用 workflow 工作流 JSON 并从 history 输出中读取 audio/audios/files。'
   }
-  return 'ComfyUI 使用 workflow 工作流 JSON，支持 {{prompt}}、{{model}}、{{width}}、{{height}}、{{seed}}、{{input_image}}、{{first_frame}}、{{last_frame}}、{{duration}} 等占位符。'
+  return 'ComfyUI 使用 workflow 工作流 JSON，支持 {{prompt}}、{{model}}、{{width}}、{{height}}、{{fps}}、{{frame_count}}、{{seed}}、{{input_image}}、{{first_frame}}、{{last_frame}}、{{duration}} 等占位符。'
 })
 
 function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
@@ -683,6 +711,12 @@ function normalizeSettingsInput() {
     settings.supportsFirstLast = !!cfgForm.supportsFirstLast
     settings.supportsMultipleReferences = !!cfgForm.supportsMultipleReferences
     settings.maxReferenceImages = Math.max(1, Number(cfgForm.maxReferenceImages || 1))
+    settings.videoResolution = cfgForm.videoResolution === '720p' ? '720p' : '1080p'
+    const size = videoResolutionSize(settings.videoResolution)
+    settings.defaultWidth = size.width
+    settings.defaultHeight = size.height
+    settings.fps = clampNumber(cfgForm.videoFps, 1, 120, 25)
+    settings.autoFillVideoParams = true
   }
   return Object.keys(settings).length ? JSON.stringify(settings, null, 2) : ''
 }
@@ -699,6 +733,8 @@ function applyVideoCapabilityForm(settings = {}) {
   cfgForm.supportsFirstLast = !!(settings.supportsFirstLast ?? settings.supports_first_last ?? settings.capabilities?.supportsFirstLast ?? settings.capabilities?.firstLast ?? likelyMultiProvider)
   cfgForm.supportsMultipleReferences = !!(settings.supportsMultipleReferences ?? settings.supports_multiple_references ?? settings.capabilities?.supportsMultipleReferences ?? settings.capabilities?.multiple ?? likelyMultiProvider)
   cfgForm.maxReferenceImages = Math.max(1, Number(settings.maxReferenceImages ?? settings.max_reference_images ?? settings.capabilities?.maxReferenceImages ?? settings.capabilities?.max_reference_images ?? (likelyMultiProvider ? 3 : 1)))
+  cfgForm.videoResolution = inferVideoResolution(settings)
+  cfgForm.videoFps = clampNumber(settings.fps ?? settings.defaultFps ?? settings.default_fps ?? settings.frameRate ?? settings.frame_rate, 1, 120, 25)
 }
 
 function applyTextTimeoutForm(settings = {}) {
@@ -728,7 +764,7 @@ async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0, supportsFirstLast: false, supportsMultipleReferences: false, maxReferenceImages: 1, textTimeoutMinutes: 20 })
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', endpoint: '', query_endpoint: '', settingsStr: '', modelStr: '', service_type: t, priority: 0, supportsFirstLast: false, supportsMultipleReferences: false, maxReferenceImages: 1, videoResolution: '1080p', videoFps: 25, textTimeoutMinutes: 20 })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true

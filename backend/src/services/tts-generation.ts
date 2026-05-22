@@ -13,6 +13,7 @@ import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuc
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
+const DEFAULT_TTS_TIMEOUT_MS = 1_800_000
 
 interface TTSParams {
   text: string
@@ -41,7 +42,7 @@ async function executeProviderRequest(request: any) {
     method: request.method,
     headers: request.headers,
     body,
-    signal: AbortSignal.timeout(Number(request.timeoutMs || 600_000)),
+    signal: AbortSignal.timeout(Number(request.timeoutMs || DEFAULT_TTS_TIMEOUT_MS)),
   })
 }
 
@@ -177,8 +178,16 @@ export async function generateTTS(params: TTSParams): Promise<string> {
   } else {
     const result = await resp.json()
     const comfyTask = (adapter as any).parseGenerateResponse?.(result)
+    const pollTimeoutMs = Number(
+      request.timeoutMs
+      || config.settings?.pollTimeoutMs
+      || config.settings?.poll_timeout_ms
+      || config.settings?.timeoutMs
+      || config.settings?.timeout_ms
+      || DEFAULT_TTS_TIMEOUT_MS,
+    )
     parsed = comfyTask?.taskId && (adapter as any).buildPollRequest
-      ? await pollTTSResult(adapter, config, comfyTask.taskId, Number(request.timeoutMs || config.settings?.timeoutMs || config.settings?.timeout_ms || 600_000))
+      ? await pollTTSResult(adapter, config, comfyTask.taskId, pollTimeoutMs)
       : (comfyTask?.audioUrl || comfyTask?.audioBase64 || comfyTask?.audioHex)
         ? comfyTask
         : adapter.parseResponse(result)

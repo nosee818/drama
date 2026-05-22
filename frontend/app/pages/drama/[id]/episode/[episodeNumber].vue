@@ -296,6 +296,8 @@
               <span v-if="charsVoiced" class="char-count">{{ charsVoiced }}/{{ chars.length }} 已设计</span>
               <span v-if="voiceSampleCount" class="char-count">{{ voiceSampleCount }}/{{ charsVoiced }} 试听文件</span>
               <BaseSelect v-model="selectedAudioDesignConfigId" :options="audioDesignConfigSelectOptions" placeholder="音色设计 TTS" searchable style="width:240px" />
+              <input v-model="newVoiceCharacterName" class="input compact-input" placeholder="新增角色名" />
+              <button class="btn btn-sm" @click="createVoiceCharacter">添加角色</button>
               <button class="btn btn-sm" @click="audioSkipped ? resumeAudio() : skipAudio()">
                 {{ audioSkipped ? '恢复音频' : '跳过音频' }}
               </button>
@@ -394,10 +396,17 @@
                   <textarea
                     class="textarea voice-design-textarea"
                     rows="4"
-                    :value="c.voice_style || c.voiceStyle || ''"
+                    :value="getCharVoiceDraft(c)"
                     placeholder="例如：沉稳的中年男性，语速缓慢，音色低沉有磁性，适合剧情对白。"
-                    @change="updateCharVoice(c.id, $event.target.value)"
+                    @input="setCharVoiceDraft(c, $event.target.value)"
                   />
+                  <div v-if="isCharVoiceDirty(c)" class="field-edit-actions">
+                    <span>未保存</span>
+                    <button class="btn btn-sm" :disabled="isSavingCharVoice(c)" @click="updateCharVoice(c.id)">
+                      {{ isSavingCharVoice(c) ? '确认中' : '确认' }}
+                    </button>
+                    <button class="btn btn-sm" :disabled="isSavingCharVoice(c)" @click="cancelCharVoiceDraft(c)">取消</button>
+                  </div>
                 </div>
 
                 <div v-if="getVoiceProfile(c.voice_style || c.voiceStyle)" class="voice-profile-card">
@@ -421,6 +430,7 @@
                   <a v-if="c.voice_sample_url || c.voiceSampleUrl" class="btn btn-sm" :href="assetHref(c.voice_sample_url || c.voiceSampleUrl)" download>
                     下载样本
                   </a>
+                  <button class="btn btn-sm" style="color:var(--error)" @click="deleteVoiceCharacter(c)">删除角色</button>
                   <span class="dim" style="font-size:11px">{{ (c.voice_sample_url || c.voiceSampleUrl) ? '已生成声音样本，可直接播放' : '生成后可快速确认角色声音' }}</span>
                 </div>
 
@@ -443,17 +453,35 @@
             </div>
             <div class="toolbar-right">
               <span v-if="sbs.length" class="char-count">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-              <button v-if="sbs.length" class="btn btn-sm" @click="addShot">
+              <button class="btn btn-sm" @click="addShot(selectedSb)">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 添加
               </button>
+              <BaseSelect
+                v-if="imageConfigSelectOptions.length"
+                v-model="selectedShotImageConfigId"
+                :options="imageConfigSelectOptions"
+                placeholder="选择镜头图片模型"
+                searchable
+                style="width:230px"
+              />
+              <span v-else class="locked-config">镜头图片模型 · 未配置</span>
+              <BaseSelect
+                v-if="videoConfigSelectOptions.length"
+                v-model="selectedVideoConfigId"
+                :options="videoConfigSelectOptions"
+                placeholder="选择视频模型"
+                searchable
+                style="width:230px"
+              />
+              <span v-else class="locked-config">视频模型 · 未配置</span>
               <BaseSelect
                 v-if="textConfigSelectOptions.length"
                 v-model="selectedStoryboardTextConfigId"
                 :options="textConfigSelectOptions"
                 placeholder="选择语言模型"
                 searchable
-                style="width:280px"
+                style="width:230px"
               />
               <span v-else class="locked-config">语言模型 · 未配置</span>
               <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
@@ -482,13 +510,21 @@
                   @click="selectedSb = sb"
                 >
                   <div class="shot-item-header">
-                    <div class="shot-num">#{{ String(i+1).padStart(2,'0') }}</div>
+                    <div class="shot-num">#{{ formatStoryboardNumber(sb, i) }}</div>
                     <span class="tag" style="font-size:10px">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     <span v-if="getStoryboardCharacterIds(sb).length" class="tag" style="font-size:10px">{{ getStoryboardCharacterIds(sb).length }} 角色</span>
                     <div class="shot-status">
                       <div v-if="sb.imageUrl || sb.composedImage || sb.firstFrameImage" class="shot-dot has-img" title="已生成图片"></div>
                       <div v-if="sb.videoUrl || sb.composedVideoUrl" class="shot-dot has-video" title="已生成视频"></div>
                       <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
+                    </div>
+                    <div class="shot-inline-actions" @click.stop>
+                      <button class="shot-mini-action" type="button" title="在下方插入分镜" @click="addShot(sb)">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                      </button>
+                      <button class="shot-mini-action danger" type="button" title="删除分镜" @click="deleteShot(sb)">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                      </button>
                     </div>
                   </div>
                   <div class="shot-body">
@@ -515,83 +551,160 @@
             <div class="detail-panel" v-if="selectedSb">
                 <div class="detail-head">
                   <div class="detail-head-copy">
-                    <span class="detail-head-title">镜头 #{{ sbs.indexOf(selectedSb) + 1 }}</span>
-                  <span class="detail-head-sub">{{ selectedSb.title || `镜头 ${sbs.indexOf(selectedSb) + 1}` }} · {{ selectedSb.shot_type || selectedSb.shotType || '未设置景别' }}</span>
+                    <span class="detail-head-title">镜头 #{{ formatStoryboardNumber(selectedSb, sbs.indexOf(selectedSb)) }}</span>
+                  <span class="detail-head-sub">{{ selectedSb.title || `镜头 ${formatStoryboardNumber(selectedSb, sbs.indexOf(selectedSb))}` }} · {{ selectedSb.shot_type || selectedSb.shotType || '未设置景别' }}</span>
                   </div>
                   <span class="tag mono">{{ (selectedSb.duration || 10) }}s</span>
-                  <button class="btn btn-ghost btn-icon ml-auto" style="color:var(--error)" @click="deleteShot(selectedSb)">
+                  <button class="btn btn-ghost btn-icon ml-auto" title="在下方插入分镜" @click="addShot(selectedSb)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </button>
+                  <button class="btn btn-ghost btn-icon" style="color:var(--error)" title="删除分镜" @click="deleteShot(selectedSb)">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
                   </button>
               </div>
               <div class="detail-body">
-                <div class="detail-hero">
-                  <div class="detail-hero-copy">
-                    <div class="detail-hero-label">镜头概览</div>
-                    <div class="detail-hero-text">{{ getShotDisplayText(selectedSb) }}</div>
-                    <div class="detail-status-row">
-                      <span class="tag">{{ getSceneName(selectedSb) }}</span>
-                      <span class="tag">{{ selectedSb.angle || '未设角度' }}</span>
-                      <span class="tag">{{ selectedSb.movement || '未设运镜' }}</span>
-                      <span class="tag" :class="getFirstFrame(selectedSb) ? 'tag-success' : ''">首帧 {{ getFirstFrame(selectedSb) ? '已生成' : '待生成' }}</span>
-                      <span class="tag" :class="getLastFrame(selectedSb) ? 'tag-success' : ''">尾帧 {{ getLastFrame(selectedSb) ? '已生成' : '待生成' }}</span>
-                      <span class="tag" :class="hasVid(selectedSb) ? 'tag-success' : ''">视频 {{ hasVid(selectedSb) ? '已生成' : '待生成' }}</span>
+                <div class="shot-workbench">
+                  <section class="shot-work-card">
+                    <div class="shot-work-media">
+                      <img
+                        v-if="getFirstFrame(selectedSb)"
+                        :src="'/' + getFirstFrame(selectedSb)"
+                        class="previewable-image"
+                        @click.stop="openImageViewer('/' + getFirstFrame(selectedSb), `镜头 #${formatStoryboardNumber(selectedSb, sbs.indexOf(selectedSb))} 首帧`)"
+                      />
+                      <div v-else class="shot-work-empty">首帧待生成</div>
+                      <div class="shot-work-actions" @click.stop>
+                        <button class="asset-mini-btn" type="button" :disabled="assetUploadBusy" @click="openAssetUpload('shot_frame', selectedSb.id, { frameType: 'first_frame' })">上传</button>
+                        <a v-if="getFirstFrame(selectedSb)" class="asset-mini-btn" :href="assetHref(getFirstFrame(selectedSb))" download>下载</a>
+                      </div>
                     </div>
-                    <div class="reference-strip" v-if="getShotReferenceAssets(selectedSb).length">
-                      <span class="reference-label">引用资产</span>
-                      <span
-                        v-for="asset in getShotReferenceAssets(selectedSb)"
-                        :key="`${selectedSb.id}-${asset.type}-${asset.label}`"
-                        :class="['reference-chip', asset.ready ? 'is-ready' : 'is-missing']"
-                        :title="asset.ready ? '会作为参考图传入生图接口' : '尚未生成，暂时不会传入参考图'"
-                      >{{ asset.label }}</span>
-                    </div>
-                    <div class="shot-prompt-editor">
-                      <div class="shot-prompt-editor-head">
-                        <span>镜头图片提示词</span>
-                        <span :class="['prompt-lock-state', isShotPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
-                          {{ isShotPromptDirty(selectedSb) ? '有修改未保存' : '已锁定' }}
+                    <div class="shot-work-copy">
+                      <div class="shot-work-head">
+                        <div>
+                          <div class="shot-work-title">首帧画面</div>
+                          <div class="shot-work-sub">静态第一帧，视频会基于它继续运动</div>
+                        </div>
+                        <span :class="['tag', isPendingShotFrame(selectedSb.id, 'first_frame') ? 'is-pending' : (getFirstFrame(selectedSb) ? 'tag-success' : '')]">
+                          {{ isPendingShotFrame(selectedSb.id, 'first_frame') ? '生成中' : (getFirstFrame(selectedSb) ? '已生成' : '待生成') }}
                         </span>
                       </div>
-                      <textarea
-                        :value="getShotPromptDraft(selectedSb)"
-                        class="mini-textarea shot-prompt-textarea"
-                        rows="4"
-                        placeholder="用于镜头图片/首帧/尾帧生成，会同步到镜头图片页面"
-                        @input="setShotPromptDraft(selectedSb, $event.target.value)"
-                      />
-                      <div class="shot-prompt-editor-actions">
+                      <label class="prompt-edit-block shot-work-prompt">
+                        <span>首帧图片提示词</span>
+                        <textarea
+                          :value="getShotPromptDraft(selectedSb)"
+                          class="mini-textarea"
+                          rows="5"
+                          placeholder="只描述第一帧静态画面，生成时会自动加上景别和全局风格"
+                          @input="setShotPromptDraft(selectedSb, $event.target.value)"
+                        />
+                      </label>
+                      <div class="shot-work-foot">
+                        <span :class="['prompt-lock-state', isShotPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
+                          {{ isShotPromptDirty(selectedSb) ? '未保存' : '已锁定' }}
+                        </span>
                         <button class="btn btn-sm" :disabled="isSavingShotPrompt(selectedSb)" @click="saveShotImagePrompt(selectedSb)">
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                          {{ isSavingShotPrompt(selectedSb) ? '保存中' : '保存并锁定' }}
+                          {{ isSavingShotPrompt(selectedSb) ? '确认中' : '确认' }}
+                        </button>
+                        <button v-if="isShotPromptDirty(selectedSb)" class="btn btn-sm" :disabled="isSavingShotPrompt(selectedSb)" @click="cancelShotImagePrompt(selectedSb)">取消</button>
+                        <button class="btn btn-primary btn-sm" :disabled="isPendingShotFrame(selectedSb.id, 'first_frame')" @click="genShotFrame(selectedSb, 'first_frame')">
+                          {{ isPendingShotFrame(selectedSb.id, 'first_frame') ? '生成中' : (getFirstFrame(selectedSb) ? '重新生成首帧' : '生成首帧') }}
                         </button>
                       </div>
                     </div>
-                  </div>
-                  <div class="detail-preview-grid">
-                    <div class="detail-preview-card">
-                      <div class="detail-preview-title">首帧</div>
-                      <div class="detail-preview-media">
-                        <img
-                          v-if="getFirstFrame(selectedSb)"
-                          :src="'/' + getFirstFrame(selectedSb)"
-                          class="previewable-image"
-                          @click.stop="openImageViewer('/' + getFirstFrame(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 首帧`)"
-                        />
-                        <div v-else class="detail-preview-empty">待生成</div>
+                  </section>
+
+                  <section v-if="frameMode === 'first_last'" class="shot-work-card compact">
+                    <div class="shot-work-media">
+                      <img
+                        v-if="getLastFrame(selectedSb)"
+                        :src="'/' + getLastFrame(selectedSb)"
+                        class="previewable-image"
+                        @click.stop="openImageViewer('/' + getLastFrame(selectedSb), `镜头 #${formatStoryboardNumber(selectedSb, sbs.indexOf(selectedSb))} 尾帧`)"
+                      />
+                      <div v-else class="shot-work-empty">尾帧待生成</div>
+                      <div class="shot-work-actions" @click.stop>
+                        <button class="asset-mini-btn" type="button" :disabled="assetUploadBusy" @click="openAssetUpload('shot_frame', selectedSb.id, { frameType: 'last_frame' })">上传</button>
+                        <a v-if="getLastFrame(selectedSb)" class="asset-mini-btn" :href="assetHref(getLastFrame(selectedSb))" download>下载</a>
                       </div>
                     </div>
-                    <div class="detail-preview-card">
-                      <div class="detail-preview-title">尾帧</div>
-                      <div class="detail-preview-media">
-                        <img
-                          v-if="getLastFrame(selectedSb)"
-                          :src="'/' + getLastFrame(selectedSb)"
-                          class="previewable-image"
-                          @click.stop="openImageViewer('/' + getLastFrame(selectedSb), `镜头 #${sbs.indexOf(selectedSb) + 1} 尾帧`)"
-                        />
-                        <div v-else class="detail-preview-empty">待生成</div>
+                    <div class="shot-work-copy">
+                      <div class="shot-work-head">
+                        <div>
+                          <div class="shot-work-title">尾帧画面</div>
+                          <div class="shot-work-sub">仅首尾帧模式时使用</div>
+                        </div>
+                        <span :class="['tag', isPendingShotFrame(selectedSb.id, 'last_frame') ? 'is-pending' : (getLastFrame(selectedSb) ? 'tag-success' : '')]">
+                          {{ isPendingShotFrame(selectedSb.id, 'last_frame') ? '生成中' : (getLastFrame(selectedSb) ? '已生成' : '待生成') }}
+                        </span>
+                      </div>
+                      <div class="shot-work-foot">
+                        <button class="btn btn-primary btn-sm" :disabled="isPendingShotFrame(selectedSb.id, 'last_frame')" @click="genShotFrame(selectedSb, 'last_frame')">
+                          {{ isPendingShotFrame(selectedSb.id, 'last_frame') ? '生成中' : (getLastFrame(selectedSb) ? '重新生成尾帧' : '生成尾帧') }}
+                        </button>
                       </div>
                     </div>
+                  </section>
+
+                  <section class="shot-work-card">
+                    <div class="shot-work-media video">
+                      <video
+                        v-if="hasVid(selectedSb)"
+                        :src="'/' + getVideoUrl(selectedSb)"
+                        class="prod-video"
+                        controls
+                        preload="metadata"
+                        playsinline
+                      />
+                      <div v-else class="shot-work-empty">视频待生成</div>
+                      <div class="shot-work-actions" @click.stop>
+                        <button class="asset-mini-btn" type="button" :disabled="assetUploadBusy" @click="openAssetUpload('shot_video', selectedSb.id)">上传</button>
+                        <a v-if="hasVid(selectedSb)" class="asset-mini-btn" :href="assetHref(getVideoUrl(selectedSb))" download>下载</a>
+                      </div>
+                    </div>
+                    <div class="shot-work-copy">
+                      <div class="shot-work-head">
+                        <div>
+                          <div class="shot-work-title">首帧生成视频</div>
+                          <div class="shot-work-sub">视频提示词描述动作、运镜和时间变化</div>
+                        </div>
+                        <span :class="['tag', isPendingVideo(selectedSb.id) ? 'is-pending' : (hasVid(selectedSb) ? 'tag-success' : '')]">
+                          {{ isPendingVideo(selectedSb.id) ? '生成中' : (hasVid(selectedSb) ? '已生成' : '待生成') }}
+                        </span>
+                      </div>
+                      <label class="prompt-edit-block shot-work-prompt">
+                        <span>视频提示词</span>
+                        <textarea
+                          :value="getVideoPromptDraft(selectedSb)"
+                          class="mini-textarea"
+                          rows="5"
+                          placeholder="描述首帧之后发生的动作、人物状态变化、镜头运动和节奏"
+                          @input="setVideoPromptDraft(selectedSb, $event.target.value)"
+                        />
+                      </label>
+                      <div v-if="videoFailMessage(selectedSb.id)" class="prod-error">{{ videoFailMessage(selectedSb.id) }}</div>
+                      <div class="shot-work-foot">
+                        <span :class="['prompt-lock-state', isVideoPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
+                          {{ isVideoPromptDirty(selectedSb) ? '未保存' : '已保存' }}
+                        </span>
+                        <button class="btn btn-sm" :disabled="isSavingVideoPrompt(selectedSb)" @click="saveShotVideoPrompt(selectedSb)">
+                          {{ isSavingVideoPrompt(selectedSb) ? '确认中' : '确认' }}
+                        </button>
+                        <button v-if="isVideoPromptDirty(selectedSb)" class="btn btn-sm" :disabled="isSavingVideoPrompt(selectedSb)" @click="cancelShotVideoPrompt(selectedSb)">取消</button>
+                        <button class="btn btn-primary btn-sm" :disabled="!getFirstFrame(selectedSb) || isPendingVideo(selectedSb.id)" @click="genShotVideo(selectedSb)">
+                          {{ isPendingVideo(selectedSb.id) ? '生成中' : (hasVid(selectedSb) ? '重新生成视频' : '生成视频') }}
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+
+                  <div class="reference-strip" v-if="getShotReferenceAssets(selectedSb).length">
+                    <span class="reference-label">引用资产</span>
+                    <span
+                      v-for="asset in getShotReferenceAssets(selectedSb)"
+                      :key="`${selectedSb.id}-${asset.type}-${asset.label}`"
+                      :class="['reference-chip', asset.ready ? 'is-ready' : 'is-missing']"
+                      :title="asset.ready ? '会作为参考图传入生图接口' : '尚未生成，暂时不会传入参考图'"
+                    >{{ asset.label }}</span>
                   </div>
                 </div>
                 <div class="detail-section">
@@ -602,47 +715,67 @@
                   <div class="field-grid field-grid-4">
                     <label class="field">
                       <span class="field-label">标题</span>
-                      <input :value="selectedSb.title || ''" class="input"
-                        @blur="updateField(selectedSb, 'title', $event.target.value)" placeholder="如：雪地逼近" />
+                      <input :value="getFieldDraft(selectedSb, 'title')" class="input"
+                        @input="setFieldDraft(selectedSb, 'title', $event.target.value)" placeholder="如：雪地逼近" />
+                      <div v-if="isFieldDirty(selectedSb, 'title')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'title')" @click="confirmFieldDraft(selectedSb, 'title')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'title')" @click="cancelFieldDraft(selectedSb, 'title')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">景别</span>
                       <input
                         list="shot-type-list"
-                        :value="selectedSb.shot_type || selectedSb.shotType || ''"
+                        :value="getFieldDraft(selectedSb, 'shot_type')"
                         class="input"
                         placeholder="选择或输入景别"
-                        @change="updateField(selectedSb, 'shot_type', $event.target.value)"
+                        @input="setFieldDraft(selectedSb, 'shot_type', $event.target.value)"
                       />
                       <datalist id="shot-type-list">
                         <option v-for="t in shotTypes" :key="t" :value="t" />
                       </datalist>
+                      <div v-if="isFieldDirty(selectedSb, 'shot_type')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'shot_type')" @click="confirmFieldDraft(selectedSb, 'shot_type')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'shot_type')" @click="cancelFieldDraft(selectedSb, 'shot_type')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">角度</span>
                       <input
                         list="shot-angle-list"
-                        :value="selectedSb.angle || ''"
+                        :value="getFieldDraft(selectedSb, 'angle')"
                         class="input"
                         placeholder="选择或输入角度"
-                        @change="updateField(selectedSb, 'angle', $event.target.value)"
+                        @input="setFieldDraft(selectedSb, 'angle', $event.target.value)"
                       />
                       <datalist id="shot-angle-list">
                         <option v-for="t in shotAngles" :key="t" :value="t" />
                       </datalist>
+                      <div v-if="isFieldDirty(selectedSb, 'angle')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'angle')" @click="confirmFieldDraft(selectedSb, 'angle')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'angle')" @click="cancelFieldDraft(selectedSb, 'angle')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">运镜</span>
                       <input
                         list="shot-movement-list"
-                        :value="selectedSb.movement || ''"
+                        :value="getFieldDraft(selectedSb, 'movement')"
                         class="input"
                         placeholder="选择或输入运镜"
-                        @change="updateField(selectedSb, 'movement', $event.target.value)"
+                        @input="setFieldDraft(selectedSb, 'movement', $event.target.value)"
                       />
                       <datalist id="shot-movement-list">
                         <option v-for="t in shotMovements" :key="t" :value="t" />
                       </datalist>
+                      <div v-if="isFieldDirty(selectedSb, 'movement')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'movement')" @click="confirmFieldDraft(selectedSb, 'movement')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'movement')" @click="cancelFieldDraft(selectedSb, 'movement')">取消</button>
+                      </div>
                     </label>
                   </div>
                   <div class="field-grid field-grid-4">
@@ -653,38 +786,63 @@
                           v-for="char in chars"
                           :key="char.id"
                           type="button"
-                          :class="['role-pill', { active: isStoryboardCharacterSelected(selectedSb, char.id) }]"
+                          :class="['role-pill', { active: getFieldDraft(selectedSb, 'character_ids').includes(char.id) }]"
                           @click="toggleStoryboardCharacter(selectedSb, char.id)"
                         >
                           {{ char.name }}
                         </button>
                         <span v-if="!chars.length" class="dim" style="font-size:12px">当前集还没有角色</span>
                       </div>
+                      <div v-if="isFieldDirty(selectedSb, 'character_ids')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'character_ids')" @click="confirmFieldDraft(selectedSb, 'character_ids')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'character_ids')" @click="cancelFieldDraft(selectedSb, 'character_ids')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">绑定场景</span>
-                      <select class="input" :value="selectedSb.scene_id || selectedSb.sceneId || ''"
-                        @change="updateField(selectedSb, 'scene_id', $event.target.value ? Number($event.target.value) : null)">
+                      <select class="input" :value="getFieldDraft(selectedSb, 'scene_id') || ''"
+                        @change="setFieldDraft(selectedSb, 'scene_id', $event.target.value ? Number($event.target.value) : null)">
                         <option value="">未绑定场景</option>
                         <option v-for="scene in scenes" :key="scene.id" :value="scene.id">
                           {{ scene.location }} · {{ scene.time || '未设时间' }}
                         </option>
                       </select>
+                      <div v-if="isFieldDirty(selectedSb, 'scene_id')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'scene_id')" @click="confirmFieldDraft(selectedSb, 'scene_id')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'scene_id')" @click="cancelFieldDraft(selectedSb, 'scene_id')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">地点</span>
-                      <input :value="selectedSb.location || ''" class="input"
-                        @blur="updateField(selectedSb, 'location', $event.target.value)" placeholder="场景地点" />
+                      <input :value="getFieldDraft(selectedSb, 'location')" class="input"
+                        @input="setFieldDraft(selectedSb, 'location', $event.target.value)" placeholder="场景地点" />
+                      <div v-if="isFieldDirty(selectedSb, 'location')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'location')" @click="confirmFieldDraft(selectedSb, 'location')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'location')" @click="cancelFieldDraft(selectedSb, 'location')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">时间</span>
-                      <input :value="selectedSb.time || ''" class="input"
-                        @blur="updateField(selectedSb, 'time', $event.target.value)" placeholder="如：深夜 / 清晨" />
+                      <input :value="getFieldDraft(selectedSb, 'time')" class="input"
+                        @input="setFieldDraft(selectedSb, 'time', $event.target.value)" placeholder="如：深夜 / 清晨" />
+                      <div v-if="isFieldDirty(selectedSb, 'time')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'time')" @click="confirmFieldDraft(selectedSb, 'time')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'time')" @click="cancelFieldDraft(selectedSb, 'time')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">时长</span>
-                      <input :value="selectedSb.duration || 10" class="input" type="number" min="1" max="60"
-                        @blur="updateField(selectedSb, 'duration', Number($event.target.value))" />
+                      <input :value="getFieldDraft(selectedSb, 'duration') || 10" class="input" type="number" min="1" max="60"
+                        @input="setFieldDraft(selectedSb, 'duration', Number($event.target.value))" />
+                      <div v-if="isFieldDirty(selectedSb, 'duration')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'duration')" @click="confirmFieldDraft(selectedSb, 'duration')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'duration')" @click="cancelFieldDraft(selectedSb, 'duration')">取消</button>
+                      </div>
                     </label>
                   </div>
                 </div>
@@ -696,73 +854,57 @@
                   <div class="field-grid field-grid-2">
                     <label class="field">
                       <span class="field-label">动作</span>
-                      <textarea :value="selectedSb.action || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'action', $event.target.value)" placeholder="谁在做什么，表情和动作细节是什么" />
+                      <textarea :value="getFieldDraft(selectedSb, 'action')" class="textarea" rows="3"
+                        @input="setFieldDraft(selectedSb, 'action', $event.target.value)" placeholder="谁在做什么，表情和动作细节是什么" />
+                      <div v-if="isFieldDirty(selectedSb, 'action')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'action')" @click="confirmFieldDraft(selectedSb, 'action')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'action')" @click="cancelFieldDraft(selectedSb, 'action')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">结果</span>
-                      <textarea :value="selectedSb.result || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'result', $event.target.value)" placeholder="镜头结束时的状态变化或画面结果" />
+                      <textarea :value="getFieldDraft(selectedSb, 'result')" class="textarea" rows="3"
+                        @input="setFieldDraft(selectedSb, 'result', $event.target.value)" placeholder="镜头结束时的状态变化或画面结果" />
+                      <div v-if="isFieldDirty(selectedSb, 'result')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'result')" @click="confirmFieldDraft(selectedSb, 'result')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'result')" @click="cancelFieldDraft(selectedSb, 'result')">取消</button>
+                      </div>
                     </label>
                   </div>
                   <div class="field-grid field-grid-2">
                     <label class="field">
                       <span class="field-label">画面描述</span>
-                      <textarea :value="selectedSb.description || ''" class="textarea" rows="4"
-                        @blur="updateField(selectedSb, 'description', $event.target.value)" placeholder="描述画面内容..." />
+                      <textarea :value="getFieldDraft(selectedSb, 'description')" class="textarea" rows="4"
+                        @input="setFieldDraft(selectedSb, 'description', $event.target.value)" placeholder="描述画面内容..." />
+                      <div v-if="isFieldDirty(selectedSb, 'description')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'description')" @click="confirmFieldDraft(selectedSb, 'description')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'description')" @click="cancelFieldDraft(selectedSb, 'description')">取消</button>
+                      </div>
                     </label>
                     <label class="field">
                       <span class="field-label">氛围</span>
-                      <textarea :value="selectedSb.atmosphere || ''" class="textarea" rows="4"
-                        @blur="updateField(selectedSb, 'atmosphere', $event.target.value)" placeholder="光线、色调、空气感、环境氛围" />
+                      <textarea :value="getFieldDraft(selectedSb, 'atmosphere')" class="textarea" rows="4"
+                        @input="setFieldDraft(selectedSb, 'atmosphere', $event.target.value)" placeholder="光线、色调、空气感、环境氛围" />
+                      <div v-if="isFieldDirty(selectedSb, 'atmosphere')" class="field-edit-actions">
+                        <span>未保存</span>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'atmosphere')" @click="confirmFieldDraft(selectedSb, 'atmosphere')">确认</button>
+                        <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'atmosphere')" @click="cancelFieldDraft(selectedSb, 'atmosphere')">取消</button>
+                      </div>
                     </label>
                   </div>
                   <label class="field">
                     <span class="field-label">对白 / 旁白</span>
-                    <textarea :value="selectedSb.dialogue || ''" class="textarea" rows="3"
-                      @blur="updateField(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容 或 旁白：内容" />
-                  </label>
-                </div>
-                <div class="detail-section">
-                  <div class="detail-section-head">
-                    <span class="detail-section-title">生成提示</span>
-                    <span class="detail-section-copy">分别服务图片、视频、配乐和音效生成</span>
-                  </div>
-                  <label class="field">
-                    <span class="field-label">镜头图片提示词</span>
-                    <textarea
-                      :value="getShotPromptDraft(selectedSb)"
-                      class="textarea"
-                      rows="4"
-                      placeholder="用于首帧、尾帧和镜头图片的单帧画面提示词"
-                      @input="setShotPromptDraft(selectedSb, $event.target.value)"
-                    />
-                    <div class="prompt-field-actions">
-                      <span :class="['prompt-lock-state', isShotPromptDirty(selectedSb) ? 'is-dirty' : 'is-locked']">
-                        {{ isShotPromptDirty(selectedSb) ? '有修改未保存' : '已锁定并用于生图' }}
-                      </span>
-                      <button class="btn btn-sm" :disabled="isSavingShotPrompt(selectedSb)" @click="saveShotImagePrompt(selectedSb)">
-                        {{ isSavingShotPrompt(selectedSb) ? '保存中' : '保存并锁定' }}
-                      </button>
+                    <textarea :value="getFieldDraft(selectedSb, 'dialogue')" class="textarea" rows="3"
+                      @input="setFieldDraft(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容 或 旁白：内容" />
+                    <div v-if="isFieldDirty(selectedSb, 'dialogue')" class="field-edit-actions">
+                      <span>未保存</span>
+                      <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'dialogue')" @click="confirmFieldDraft(selectedSb, 'dialogue')">确认</button>
+                      <button class="btn btn-sm" :disabled="isFieldSaving(selectedSb, 'dialogue')" @click="cancelFieldDraft(selectedSb, 'dialogue')">取消</button>
                     </div>
                   </label>
-                  <label class="field">
-                    <span class="field-label">视频提示词</span>
-                    <textarea :value="selectedSb.video_prompt || selectedSb.videoPrompt || ''" class="textarea" rows="5"
-                      @blur="updateField(selectedSb, 'video_prompt', $event.target.value)" placeholder="按 3 秒分段的视频提示词..." />
-                  </label>
-                  <div class="field-grid field-grid-2">
-                    <label class="field">
-                      <span class="field-label">配乐提示词</span>
-                      <textarea :value="selectedSb.bgm_prompt || selectedSb.bgmPrompt || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'bgm_prompt', $event.target.value)" placeholder="如：压抑低频弦乐，缓慢推进" />
-                    </label>
-                    <label class="field">
-                      <span class="field-label">音效提示词</span>
-                      <textarea :value="selectedSb.sound_effect || selectedSb.soundEffect || ''" class="textarea" rows="3"
-                        @blur="updateField(selectedSb, 'sound_effect', $event.target.value)" placeholder="如：风雪声、脚踩积雪、衣料摩擦声" />
-                    </label>
-                  </div>
                 </div>
               </div>
             </div>
@@ -852,6 +994,10 @@
               <span v-else class="tag">图片模型 · 未配置</span>
               <span v-if="chars.length > visualChars.length" class="tag">旁白仅保留声音</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="downloadCharacterImages">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
+                </button>
                 <button class="btn btn-sm" @click="batchCharImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   批量生成
@@ -882,12 +1028,21 @@
                   <label class="prompt-edit-block">
                     <span>角色图片提示词</span>
                     <textarea
-                      :value="c.appearance || c.description || ''"
+                      :value="getCharacterPromptDraft(c)"
                       class="mini-textarea"
                       rows="4"
                       placeholder="描述外貌、服装、气质、镜头风格..."
-                      @blur="updateCharacterPrompt(c, $event.target.value)"
+                      @input="setCharacterPromptDraft(c, $event.target.value)"
                     />
+                    <div class="frame-prompt-actions">
+                      <span :class="['prompt-lock-state', isCharacterPromptDirty(c) ? 'is-dirty' : 'is-locked']">
+                        {{ isCharacterPromptDirty(c) ? '未保存' : '已保存' }}
+                      </span>
+                      <button class="btn btn-sm" :disabled="isSavingCharacterPrompt(c)" @click="updateCharacterPrompt(c)">
+                        {{ isSavingCharacterPrompt(c) ? '确认中' : '确认' }}
+                      </button>
+                      <button v-if="isCharacterPromptDirty(c)" class="btn btn-sm" :disabled="isSavingCharacterPrompt(c)" @click="cancelCharacterPrompt(c)">取消</button>
+                    </div>
                   </label>
                 </div>
                 <div class="asset-foot">
@@ -913,6 +1068,10 @@
               />
               <span v-else class="tag">图片模型 · 未配置</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="downloadSceneImages">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
+                </button>
                 <button class="btn btn-sm" @click="batchSceneImages">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                   批量生成
@@ -943,12 +1102,21 @@
                   <label class="prompt-edit-block">
                     <span>场景图片提示词</span>
                     <textarea
-                      :value="s.prompt || ''"
+                      :value="getScenePromptDraft(s)"
                       class="mini-textarea"
                       rows="4"
                       placeholder="描述空间、光线、色调、氛围、构图..."
-                      @blur="updateScenePrompt(s, $event.target.value)"
+                      @input="setScenePromptDraft(s, $event.target.value)"
                     />
+                    <div class="frame-prompt-actions">
+                      <span :class="['prompt-lock-state', isScenePromptDirty(s) ? 'is-dirty' : 'is-locked']">
+                        {{ isScenePromptDirty(s) ? '未保存' : '已保存' }}
+                      </span>
+                      <button class="btn btn-sm" :disabled="isSavingScenePrompt(s)" @click="updateScenePrompt(s)">
+                        {{ isSavingScenePrompt(s) ? '确认中' : '确认' }}
+                      </button>
+                      <button v-if="isScenePromptDirty(s)" class="btn btn-sm" :disabled="isSavingScenePrompt(s)" @click="cancelScenePrompt(s)">取消</button>
+                    </div>
                   </label>
                 </div>
                 <div class="asset-foot">
@@ -967,7 +1135,15 @@
               <span class="tag mono">{{ audioSkipped ? '已跳过' : `${ttsGeneratedCount}/${ttsEligibleCount} 已生成` }}</span>
               <BaseSelect v-model="selectedAudioCloneConfigId" :options="audioCloneConfigSelectOptions" placeholder="配音克隆 TTS" searchable style="width:260px" />
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="addDubbing()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  添加配音
+                </button>
                 <button class="btn btn-sm" @click="audioSkipped ? resumeAudio() : skipAudio()">{{ audioSkipped ? '恢复配音' : '跳过配音' }}</button>
+                <button class="btn btn-sm" :disabled="audioSkipped" @click="downloadShotAudios">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
+                </button>
                 <button class="btn btn-sm" :disabled="audioSkipped || pendingTTSIds.length > 0" @click="batchShotTTS">
                   <Loader2 v-if="pendingTTSIds.length > 0" :size="11" class="animate-spin" />
                   <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
@@ -985,44 +1161,71 @@
               <button class="btn" @click="resumeAudio">恢复配音</button>
             </div>
 
-            <div v-else-if="!ttsEligibleCount" class="step-empty" style="min-height:260px">
+            <div v-else-if="!dubbings.length" class="step-empty" style="min-height:260px">
               <div class="empty-visual">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
               </div>
               <div class="empty-title">当前没有可生成的配音</div>
-              <div class="empty-desc">先在分镜里填写“角色名：台词”或“旁白：文案”，这里就会出现待生成的语音镜头。</div>
+              <div class="empty-desc">可以从分镜台词自动导入，也可以手动添加多条配音，并绑定到任意镜头。</div>
+              <button class="btn" @click="addDubbing()">添加第一条配音</button>
             </div>
 
             <div v-else class="dub-grid">
-                <div v-for="(sb, i) in sbs.filter(hasDialogue)" :key="sb.id" class="card dub-card">
+                <div v-for="(dub, i) in dubbings" :key="dub.id" class="card dub-card">
                   <div class="dub-head">
                     <div class="dub-copy">
                     <div class="dub-title">
-                      <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
-                      <span class="frame-badge">{{ getDialogueSpeaker(sb) }}</span>
+                      <span class="frame-num">#{{ dubbingShotLabel(dub) }}</span>
+                      <span class="frame-badge">{{ dub.speaker_name || dub.speakerName || '旁白' }}</span>
+                    </div>
+                    <div class="dubbing-control-grid">
+                      <BaseSelect
+                        :model-value="getDubbingDraftValue(dub, 'storyboard_id')"
+                        :options="storyboardSelectOptions"
+                        placeholder="选择镜头"
+                        searchable
+                        @update:model-value="setDubbingDraft(dub, { storyboard_id: $event })"
+                      />
+                      <BaseSelect
+                        :model-value="getDubbingDraftValue(dub, 'character_id') || null"
+                        :options="dubbingCharacterOptions"
+                        placeholder="选择角色"
+                        searchable
+                        @update:model-value="setDubbingDraft(dub, { character_id: $event })"
+                      />
                     </div>
                     <textarea
                       class="mini-textarea dub-dialogue-textarea"
                       rows="4"
-                      :value="getDialogueText(sb)"
+                      :value="getDubbingDraftValue(dub, 'text')"
                       placeholder="可直接修改本镜头配音台词"
                       @click.stop
-                      @blur="updateDialogueText(sb, $event.target.value)"
+                      @input="setDubbingDraft(dub, { text: $event.target.value })"
                     />
+                    <div v-if="isDubbingDirty(dub)" class="field-edit-actions">
+                      <span>未保存</span>
+                      <button class="btn btn-sm" :disabled="isDubbingSaving(dub)" @click="confirmDubbingDraft(dub)">
+                        {{ isDubbingSaving(dub) ? '确认中' : '确认' }}
+                      </button>
+                      <button class="btn btn-sm" :disabled="isDubbingSaving(dub)" @click="cancelDubbingDraft(dub)">取消</button>
                     </div>
-                    <span class="tag" :class="hasTTS(sb) ? 'tag-success' : ''">{{ hasTTS(sb) ? '已生成' : '待生成' }}</span>
+                    </div>
+                    <span class="tag" :class="hasDubbingTTS(dub) ? 'tag-success' : ''">{{ isDubbingPending(dub.id) ? '生成中' : (hasDubbingTTS(dub) ? '已生成' : '待生成') }}</span>
                   </div>
                 <div class="dub-meta">
-                  <span class="dim">{{ sb.shot_type || sb.shotType || '未设景别' }}</span>
-                  <span class="dim">{{ sb.duration || 10 }}s</span>
-                  <span class="dim">{{ sb.location || '未设地点' }}</span>
+                  <span class="dim">第 {{ i + 1 }} 条</span>
+                  <span class="dim">{{ dubbingShot(dub)?.shot_type || dubbingShot(dub)?.shotType || '未设景别' }}</span>
+                  <span class="dim">{{ dubbingShot(dub)?.duration || dub.storyboard_duration || dub.storyboardDuration || 10 }}s</span>
+                  <span class="dim">{{ dubbingShot(dub)?.location || '未设地点' }}</span>
                 </div>
                 <div class="dub-foot">
-                  <audio v-if="hasTTS(sb)" :src="'/' + getTTSUrl(sb)" controls preload="none" class="dub-audio" />
-                  <div v-else class="dim" style="font-size:12px">{{ isTTSPending(sb.id) ? '配音生成中...' : '尚未生成语音文件' }}</div>
-                  <button class="btn btn-sm ml-auto" :disabled="isTTSPending(sb.id)" @click="genShotTTS(sb)">
-                    <Loader2 v-if="isTTSPending(sb.id)" :size="11" class="animate-spin" />
-                    {{ isTTSPending(sb.id) ? '生成中' : (hasTTS(sb) ? '重新生成配音' : '生成配音') }}
+                  <audio v-if="hasDubbingTTS(dub)" :src="'/' + getDubbingTTSUrl(dub)" controls preload="none" class="dub-audio" />
+                  <div v-else class="dim" style="font-size:12px">{{ isDubbingPending(dub.id) ? '配音生成中...' : '尚未生成语音文件' }}</div>
+                  <button class="btn btn-sm" @click="addDubbing(dub)">在后面添加</button>
+                  <button class="btn btn-sm" style="color:var(--error)" @click="deleteDubbing(dub)">删除</button>
+                  <button class="btn btn-sm ml-auto" :disabled="isDubbingPending(dub.id)" @click="genDubbingTTS(dub)">
+                    <Loader2 v-if="isDubbingPending(dub.id)" :size="11" class="animate-spin" />
+                    {{ isDubbingPending(dub.id) ? '生成中' : (hasDubbingTTS(dub) ? '重新生成配音' : '生成配音') }}
                   </button>
                 </div>
               </div>
@@ -1048,6 +1251,10 @@
                 <button v-if="gridImagePath" class="btn btn-sm" @click="reopenGridPreview">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
                   查看当前宫格图
+                </button>
+                <button class="btn btn-sm" @click="downloadShotFrames">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
                 </button>
                 <button class="btn btn-sm" @click="batchShotFrames">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -1121,7 +1328,7 @@
                   <!-- Info: number + type + desc -->
                   <div class="frame-info">
                     <div class="frame-top">
-                      <span class="frame-num">#{{ String(i+1).padStart(2,'0') }}</span>
+                      <span class="frame-num">#{{ formatStoryboardNumber(sb, i) }}</span>
                       <span class="frame-badge">{{ sb.shot_type || sb.shotType || '—' }}</span>
                     </div>
                     <div class="frame-desc">{{ getShotDisplayText(sb) }}</div>
@@ -1139,8 +1346,9 @@
                           {{ isShotPromptDirty(sb) ? '未保存' : '已锁定' }}
                         </span>
                         <button class="btn btn-sm" :disabled="isSavingShotPrompt(sb)" @click.stop="saveShotImagePrompt(sb)">
-                          {{ isSavingShotPrompt(sb) ? '保存中' : '保存' }}
+                          {{ isSavingShotPrompt(sb) ? '确认中' : '确认' }}
                         </button>
+                        <button v-if="isShotPromptDirty(sb)" class="btn btn-sm" :disabled="isSavingShotPrompt(sb)" @click.stop="cancelShotImagePrompt(sb)">取消</button>
                       </div>
                     </label>
                     <div class="frame-meta">
@@ -1173,7 +1381,7 @@
                           v-if="getFirstFrame(sb)"
                           :src="'/' + getFirstFrame(sb)"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
+                          @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${formatStoryboardNumber(sb, i)} 首帧`)"
                         />
                         <div v-if="getFirstFrame(sb) && isPendingShotFrame(sb.id, 'first_frame')" class="frame-thumb-pending">
                           <Loader2 :size="14" class="animate-spin" />
@@ -1199,7 +1407,7 @@
                           v-if="getLastFrame(sb)"
                           :src="'/' + getLastFrame(sb)"
                           class="previewable-image"
-                          @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
+                          @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${formatStoryboardNumber(sb, i)} 尾帧`)"
                         />
                         <div v-if="getLastFrame(sb) && isPendingShotFrame(sb.id, 'last_frame')" class="frame-thumb-pending">
                           <Loader2 :size="14" class="animate-spin" />
@@ -1292,7 +1500,7 @@
                       :class="['grid-pick-item', { selected: gridMode === 'multi_ref' ? gridSingleTarget === sb.id : gridSelected.includes(sb.id) }]">
                       <input v-if="gridMode === 'multi_ref'" type="radio" :value="sb.id" v-model="gridSingleTarget" name="grid-target" />
                       <input v-else type="checkbox" :value="sb.id" v-model="gridSelected" />
-                      <span class="mono" style="font-size:11px;width:28px">#{{ String(i+1).padStart(2,'0') }}</span>
+                      <span class="mono" style="font-size:11px;width:46px">#{{ formatStoryboardNumber(sb, i) }}</span>
                       <span class="truncate" style="flex:1;font-size:12px">{{ sb.description || sb.title || '—' }}</span>
                     </label>
                   </div>
@@ -1453,9 +1661,13 @@
               />
               <span v-else class="tag">视频模型 · 未配置</span>
               <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm" @click="downloadShotVideos">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
+                </button>
                 <button class="btn btn-sm" @click="batchVideos">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                  批量视频
+                  批量生成
                 </button>
               </div>
             </div>
@@ -1474,12 +1686,12 @@
                     v-else-if="hasImg(sb)"
                     :src="'/' + getStoryboardCover(sb)"
                     class="previewable-image"
-                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(i + 1).padStart(2, '0')} 参考图`)"
+                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${formatStoryboardNumber(sb, i)} 参考图`)"
                   />
                   <div v-else class="prod-cover-empty">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                   </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
+                  <span class="prod-idx">#{{ formatStoryboardNumber(sb, i) }}</span>
                   <span v-if="hasComposed(sb)" class="prod-overlay-badge">已合成</span>
                   <div class="asset-cover-actions video-asset-actions" @click.stop>
                     <button class="asset-mini-btn" type="button" :disabled="assetUploadBusy" @click="openAssetUpload('shot_video', sb.id)">上传</button>
@@ -1492,12 +1704,21 @@
                   <label class="prompt-edit-block">
                     <span>视频生成提示词</span>
                     <textarea
-                      :value="sb.video_prompt || sb.videoPrompt || ''"
+                      :value="getVideoPromptDraft(sb)"
                       class="mini-textarea"
                       rows="4"
                       placeholder="描述动作、镜头运动和时间节奏..."
-                      @blur="updateField(sb, 'video_prompt', $event.target.value)"
+                      @input="setVideoPromptDraft(sb, $event.target.value)"
                     />
+                    <div class="frame-prompt-actions">
+                      <span :class="['prompt-lock-state', isVideoPromptDirty(sb) ? 'is-dirty' : 'is-locked']">
+                        {{ isVideoPromptDirty(sb) ? '未保存' : '已保存' }}
+                      </span>
+                      <button class="btn btn-sm" :disabled="isSavingVideoPrompt(sb)" @click.stop="saveShotVideoPrompt(sb)">
+                        {{ isSavingVideoPrompt(sb) ? '确认中' : '确认' }}
+                      </button>
+                      <button v-if="isVideoPromptDirty(sb)" class="btn btn-sm" :disabled="isSavingVideoPrompt(sb)" @click.stop="cancelShotVideoPrompt(sb)">取消</button>
+                    </div>
                   </label>
                   <div class="prod-dots">
                     <span :class="['dot', hasImg(sb) && 'ok']" /><span style="font-size:10px">图</span>
@@ -1526,6 +1747,10 @@
                   <input v-model="composeKeepOriginalAudio" type="checkbox" />
                   <span>保留原视频声音</span>
                 </label>
+                <button class="btn btn-sm" @click="downloadComposedVideos">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  批量下载
+                </button>
                 <button class="btn btn-sm" @click="batchCompose">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   批量配音合成
@@ -1555,12 +1780,12 @@
                     v-else-if="hasImg(sb)"
                     :src="'/' + getStoryboardCover(sb)"
                     class="previewable-image"
-                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${String(i + 1).padStart(2, '0')} 参考图`)"
+                    @click.stop="openImageViewer('/' + getStoryboardCover(sb), `镜头 #${formatStoryboardNumber(sb, i)} 参考图`)"
                   />
                   <div v-else class="prod-cover-empty">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   </div>
-                  <span class="prod-idx">#{{ String(i+1).padStart(2,'0') }}</span>
+                  <span class="prod-idx">#{{ formatStoryboardNumber(sb, i) }}</span>
                   <span v-if="hasComposed(sb)" class="prod-overlay-badge">已配音合成</span>
                 </div>
                 <div class="prod-info">
@@ -1649,7 +1874,7 @@
             <div class="export-list-head">镜头概览</div>
             <div class="export-list-body">
               <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
-                <span class="mono dim" style="font-size:10px">#{{ String(i+1).padStart(2,'0') }}</span>
+                <span class="mono dim" style="font-size:10px">#{{ formatStoryboardNumber(sb, i) }}</span>
                 <span class="truncate" style="flex:1;font-size:11px">{{ sb.description || sb.title || '—' }}</span>
                 <span :class="['dot', hasComposed(sb) && 'ok']" />
               </div>
@@ -1784,6 +2009,7 @@ const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null)
+const dubbings = ref([])
 const panel = ref('script')
 const { running: rn, runningType: rt, runningMessage, run: runAgent, sync: syncAgentRun } = useAgent()
 
@@ -1805,6 +2031,7 @@ const audioSkipped = ref(false)
 const audioSkipStorageKey = computed(() => `huobao:skip-audio:${dramaId}:${episodeNumber}`)
 const pendingVoiceSampleIds = ref([])
 const pendingTTSIds = ref([])
+const newVoiceCharacterName = ref('')
 const voiceSamplePendingStorageKey = computed(() => `veryai:voice-sample-pending:${dramaId}:${episodeNumber}`)
 const ttsPendingStorageKey = computed(() => `veryai:tts-pending:${dramaId}:${episodeNumber}`)
 let audioPendingPollTimer = null
@@ -1840,12 +2067,9 @@ const textConfigSelectOptions = computed(() => textConfigs.value
 const imageConfigSelectOptions = computed(() => imageConfigs.value
   .filter(c => c.is_active !== false)
   .map(c => ({ label: configLabel(c), value: c.id })))
-const videoConfigSelectOptions = computed(() => videoConfigs.value.filter(c => c.is_active !== false).map(c => {
-  let modelName = ''
-  try { const m = JSON.parse(c.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = c.model || '' }
-  const label = modelName ? `${modelName} (${c.provider})` : `${c.name} (${c.provider})`
-  return { label, value: c.id }
-}))
+const videoConfigSelectOptions = computed(() => videoConfigs.value
+  .filter(c => c.is_active !== false)
+  .map(c => ({ label: configLabel(c), value: c.id })))
 const frameModeOptions = [{ label: '仅首帧', value: 'first' }, { label: '首尾帧', value: 'first_last' }]
 const gridLayoutOptions = [
   { label: '2x2', value: '2x2' },
@@ -1909,10 +2133,9 @@ function dramaTextDefaultConfigId() {
 }
 
 function configLabel(config) {
-  if (!config) return '未配置'
-  let modelName = ''
-  try { const m = JSON.parse(config.model || '[]'); modelName = Array.isArray(m) ? (m[0] || '') : (m || '') } catch { modelName = config.model || '' }
-  return modelName ? `${config.name} · ${modelName} (${config.provider})` : `${config.name} (${config.provider})`
+  if (!config) return '\u672a\u914d\u7f6e'
+  const name = config.name || config.provider || '\u672a\u547d\u540d\u914d\u7f6e'
+  return config.provider ? `${name} · ${config.provider}` : name
 }
 
 function preferredConfig(configs, lockedId) {
@@ -1936,6 +2159,136 @@ function assetHref(value) {
   const text = String(value)
   if (/^(https?:|data:|blob:)/i.test(text)) return text
   return text.startsWith('/') ? text : `/${text}`
+}
+
+function safeDownloadName(value, fallback = 'asset') {
+  return String(value || fallback)
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80) || fallback
+}
+
+function assetExtension(value, fallback = '') {
+  const text = String(value || '').split('?')[0].split('#')[0]
+  const match = text.match(/\.([a-zA-Z0-9]{2,5})$/)
+  return match ? `.${match[1]}` : fallback
+}
+
+function triggerAssetDownload(item, index) {
+  const href = assetHref(item.url)
+  if (!href) return
+  window.setTimeout(() => {
+    const a = document.createElement('a')
+    a.href = href
+    a.download = item.name || ''
+    a.rel = 'noopener'
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }, index * 180)
+}
+
+function batchDownloadAssets(items, emptyMessage, successLabel) {
+  const unique = []
+  const seen = new Set()
+  for (const item of items) {
+    if (!item?.url) continue
+    const key = String(item.url)
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(item)
+  }
+  if (!unique.length) {
+    toast.info(emptyMessage)
+    return
+  }
+  unique.forEach(triggerAssetDownload)
+  toast.success(`${successLabel} ${unique.length} 个文件`)
+}
+
+function downloadCharacterImages() {
+  batchDownloadAssets(
+    visualChars.value
+      .map((c, index) => {
+        const url = c.image_url || c.imageUrl
+        return url ? { url, name: `角色-${String(index + 1).padStart(2, '0')}-${safeDownloadName(c.name)}${assetExtension(url, '.png')}` } : null
+      })
+      .filter(Boolean),
+    '当前没有可下载的角色形象',
+    '开始下载角色形象',
+  )
+}
+
+function downloadSceneImages() {
+  batchDownloadAssets(
+    scenes.value
+      .map((s, index) => {
+        const url = s.image_url || s.imageUrl
+        return url ? { url, name: `场景-${String(index + 1).padStart(2, '0')}-${safeDownloadName(s.location || s.name || s.id)}${assetExtension(url, '.png')}` } : null
+      })
+      .filter(Boolean),
+    '当前没有可下载的场景图片',
+    '开始下载场景图片',
+  )
+}
+
+function downloadShotAudios() {
+  batchDownloadAssets(
+    dubbings.value
+      .map((dub, index) => {
+        const url = getDubbingTTSUrl(dub)
+        const label = dubbingShotLabel(dub)
+        return url ? { url, name: `配音-${label}-${String(index + 1).padStart(2, '0')}-${safeDownloadName(dub.speaker_name || dub.speakerName || '旁白')}${assetExtension(url, '.mp3')}` } : null
+      })
+      .filter(Boolean),
+    '当前没有可下载的镜头配音',
+    '开始下载镜头配音',
+  )
+}
+
+function downloadShotFrames() {
+  const items = []
+  sbs.value.forEach((sb, index) => {
+    const label = formatStoryboardNumber(sb, index)
+    const first = getFirstFrame(sb)
+    const last = getLastFrame(sb)
+    const composed = sb.composed_image || sb.composedImage
+    if (first) items.push({ url: first, name: `镜头-${label}-首帧${assetExtension(first, '.png')}` })
+    if (last) items.push({ url: last, name: `镜头-${label}-尾帧${assetExtension(last, '.png')}` })
+    if (composed && composed !== first && composed !== last) items.push({ url: composed, name: `镜头-${label}-合成图${assetExtension(composed, '.png')}` })
+  })
+  batchDownloadAssets(items, '当前没有可下载的镜头图片', '开始下载镜头图片')
+}
+
+function downloadShotVideos() {
+  batchDownloadAssets(
+    sbs.value
+      .map((sb, index) => {
+        const url = getVideoUrl(sb)
+        const label = formatStoryboardNumber(sb, index)
+        return url ? { url, name: `镜头视频-${label}${assetExtension(url, '.mp4')}` } : null
+      })
+      .filter(Boolean),
+    '当前没有可下载的镜头视频',
+    '开始下载镜头视频',
+  )
+}
+
+function downloadComposedVideos() {
+  batchDownloadAssets(
+    sbs.value
+      .map((sb, index) => {
+        const url = getComposedVideoUrl(sb)
+        const label = formatStoryboardNumber(sb, index)
+        return url ? { url, name: `配音合成视频-${label}${assetExtension(url, '.mp4')}` } : null
+      })
+      .filter(Boolean),
+    '当前没有可下载的配音合成视频',
+    '开始下载配音合成视频',
+  )
 }
 
 function openAssetUpload(kind, id, options = {}) {
@@ -2313,6 +2666,20 @@ const gridFrameTypeOptions = computed(() => {
     { label: '参考图', value: 'reference' },
   ]
 })
+
+const storyboardSelectOptions = computed(() => sbs.value.map((sb, index) => ({
+  label: `#${formatStoryboardNumber(sb, index)} ${sb.title || sb.description || '镜头'}`,
+  value: sb.id,
+})))
+
+const dubbingCharacterOptions = computed(() => [
+  { label: '旁白/不指定角色', value: null },
+  ...chars.value.map(char => ({
+    label: `${char.name}${char.voice_style || char.voiceStyle ? ' · 已有音色' : ''}`,
+    value: char.id,
+  })),
+])
+
 const gridAssignedCount = computed(() => gridAssignments.value.filter(item => !!item.storyboard_id).length)
 const gridAssignmentPageSize = computed(() => {
   if (gridAssignments.value.length >= 25) return 8
@@ -2744,8 +3111,8 @@ async function doGridSplit() {
 
 const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
-const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
-const ttsGeneratedCount = computed(() => sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length)
+const ttsEligibleCount = computed(() => dubbings.value.filter(d => !isDubbingIgnorable(d)).length)
+const ttsGeneratedCount = computed(() => dubbings.value.filter(d => !isDubbingIgnorable(d) && hasDubbingTTS(d)).length)
 const shotImgCount = computed(() => sbs.value.filter(s => s.first_frame_image || s.firstFrameImage || s.last_frame_image || s.lastFrameImage || s.composed_image || s.composedImage).length)
 const shotVidCount = computed(() => sbs.value.filter(s => s.video_url || s.videoUrl).length)
 const visualCharTotal = computed(() => visualChars.value.length)
@@ -3032,10 +3399,61 @@ const currentSubStageLabel = computed(() => {
   return current?.label || currentStageLabel.value
 })
 
-function updateCharVoice(charId, voicePrompt) {
-  const nextPrompt = String(voicePrompt || '').trim()
-  characterAPI.update(charId, { voice_style: nextPrompt, voice_provider: nextPrompt ? 'custom-design' : '' })
+function getCharVoiceValue(char) {
+  return String(char?.voice_style || char?.voiceStyle || '')
+}
+
+function getCharVoiceDraft(char) {
+  if (!char?.id) return ''
+  const key = String(char.id)
+  if (Object.prototype.hasOwnProperty.call(charVoiceDrafts.value, key)) return charVoiceDrafts.value[key]
+  return getCharVoiceValue(char)
+}
+
+function setCharVoiceDraft(char, value) {
+  if (!char?.id) return
+  charVoiceDrafts.value = { ...charVoiceDrafts.value, [String(char.id)]: value }
+}
+
+function isCharVoiceDirty(char) {
+  if (!char?.id) return false
+  const key = String(char.id)
+  if (!Object.prototype.hasOwnProperty.call(charVoiceDrafts.value, key)) return false
+  return String(charVoiceDrafts.value[key] || '').trim() !== getCharVoiceValue(char).trim()
+}
+
+function isSavingCharVoice(char) {
+  return !!char?.id && savingCharVoiceIds.value.includes(char.id)
+}
+
+function cancelCharVoiceDraft(char) {
+  if (!char?.id) return
+  const key = String(char.id)
+  const { [key]: _drop, ...rest } = charVoiceDrafts.value
+  charVoiceDrafts.value = rest
+  toast.info('已取消音色修改')
+}
+
+async function updateCharVoice(charId) {
   const c = chars.value.find(ch => ch.id === charId)
+  const nextPrompt = String(getCharVoiceDraft(c) || '').trim()
+  if (!c || nextPrompt === getCharVoiceValue(c).trim()) {
+    if (c) cancelCharVoiceDraft(c)
+    return
+  }
+  if (!savingCharVoiceIds.value.includes(charId)) savingCharVoiceIds.value.push(charId)
+  try {
+    await characterAPI.update(charId, { voice_style: nextPrompt, voice_provider: nextPrompt ? 'custom-design' : '' })
+    const key = String(charId)
+    const { [key]: _drop, ...rest } = charVoiceDrafts.value
+    charVoiceDrafts.value = rest
+    toast.success('音色修改已确认')
+  } catch (e) {
+    toast.error(e.message)
+    return
+  } finally {
+    savingCharVoiceIds.value = savingCharVoiceIds.value.filter(id => id !== charId)
+  }
   if (c) {
     c.voice_style = nextPrompt
     c.voiceStyle = nextPrompt
@@ -3046,30 +3464,118 @@ function updateCharVoice(charId, voicePrompt) {
   }
 }
 
+function getCharacterPromptValue(char) {
+  return String(char?.appearance || char?.description || '')
+}
+
+function getCharacterPromptDraft(char) {
+  if (!char?.id) return ''
+  const key = String(char.id)
+  if (Object.prototype.hasOwnProperty.call(charPromptDrafts.value, key)) return charPromptDrafts.value[key]
+  return getCharacterPromptValue(char)
+}
+
+function setCharacterPromptDraft(char, value) {
+  if (!char?.id) return
+  charPromptDrafts.value = { ...charPromptDrafts.value, [String(char.id)]: value }
+}
+
+function isCharacterPromptDirty(char) {
+  if (!char?.id) return false
+  const key = String(char.id)
+  if (!Object.prototype.hasOwnProperty.call(charPromptDrafts.value, key)) return false
+  return String(charPromptDrafts.value[key] || '').trim() !== getCharacterPromptValue(char).trim()
+}
+
+function isSavingCharacterPrompt(char) {
+  return !!char?.id && savingCharPromptIds.value.includes(char.id)
+}
+
+function clearCharacterPromptDraft(char) {
+  if (!char?.id) return
+  const key = String(char.id)
+  const { [key]: _drop, ...rest } = charPromptDrafts.value
+  charPromptDrafts.value = rest
+}
+
+function cancelCharacterPrompt(char) {
+  clearCharacterPromptDraft(char)
+  toast.info('已取消角色提示词修改')
+}
+
 async function updateCharacterPrompt(char, value) {
-  const next = String(value || '').trim()
+  const next = String((value ?? getCharacterPromptDraft(char)) || '').trim()
   const current = String(char.appearance || char.description || '').trim()
-  if (next === current) return
+  if (next === current) {
+    clearCharacterPromptDraft(char)
+    return
+  }
+  if (!savingCharPromptIds.value.includes(char.id)) savingCharPromptIds.value.push(char.id)
   char.appearance = next
   char.appearancePrompt = next
   try {
     await characterAPI.update(char.id, { appearance: next })
-    toast.success('角色提示词已保存')
+    clearCharacterPromptDraft(char)
+    toast.success('角色提示词已确认')
   } catch (e) {
     toast.error(e.message)
+  } finally {
+    savingCharPromptIds.value = savingCharPromptIds.value.filter(id => id !== char.id)
   }
 }
 
-async function updateScenePrompt(scene, value) {
-  const next = String(value || '').trim()
+function getScenePromptDraft(scene) {
+  if (!scene?.id) return ''
+  const key = String(scene.id)
+  if (Object.prototype.hasOwnProperty.call(scenePromptDrafts.value, key)) return scenePromptDrafts.value[key]
+  return String(scene.prompt || '')
+}
+
+function setScenePromptDraft(scene, value) {
+  if (!scene?.id) return
+  scenePromptDrafts.value = { ...scenePromptDrafts.value, [String(scene.id)]: value }
+}
+
+function isScenePromptDirty(scene) {
+  if (!scene?.id) return false
+  const key = String(scene.id)
+  if (!Object.prototype.hasOwnProperty.call(scenePromptDrafts.value, key)) return false
+  return String(scenePromptDrafts.value[key] || '').trim() !== String(scene.prompt || '').trim()
+}
+
+function isSavingScenePrompt(scene) {
+  return !!scene?.id && savingScenePromptIds.value.includes(scene.id)
+}
+
+function clearScenePromptDraft(scene) {
+  if (!scene?.id) return
+  const key = String(scene.id)
+  const { [key]: _drop, ...rest } = scenePromptDrafts.value
+  scenePromptDrafts.value = rest
+}
+
+function cancelScenePrompt(scene) {
+  clearScenePromptDraft(scene)
+  toast.info('已取消场景提示词修改')
+}
+
+async function updateScenePrompt(scene, value, options = {}) {
+  const next = String((value ?? getScenePromptDraft(scene)) || '').trim()
   const current = String(scene.prompt || '').trim()
-  if (next === current) return
-  scene.prompt = next
+  if (next === current) {
+    clearScenePromptDraft(scene)
+    return
+  }
+  if (!savingScenePromptIds.value.includes(scene.id)) savingScenePromptIds.value.push(scene.id)
   try {
+    scene.prompt = next
     await sceneAPI.update(scene.id, { prompt: next })
-    toast.success('场景提示词已保存')
+    clearScenePromptDraft(scene)
+    if (!options.silent) toast.success('场景提示词已确认')
   } catch (e) {
     toast.error(e.message)
+  } finally {
+    savingScenePromptIds.value = savingScenePromptIds.value.filter(id => id !== scene.id)
   }
 }
 
@@ -3207,9 +3713,9 @@ function reconcileAudioPendingState() {
     pendingVoiceSampleIds.value = pendingVoiceSampleIds.value.filter(id => !doneVoiceIds.has(Number(id)))
   }
   if (pendingTTSIds.value.length) {
-    const doneTTSIds = new Set(sbs.value
-      .filter(sb => hasTTS(sb))
-      .map(sb => Number(sb.id)))
+    const doneTTSIds = new Set(dubbings.value
+      .filter(dub => hasDubbingTTS(dub))
+      .map(dub => Number(dub.id)))
     pendingTTSIds.value = pendingTTSIds.value.filter(id => !doneTTSIds.has(Number(id)))
   }
   persistAudioPendingState()
@@ -3253,6 +3759,18 @@ const totalDuration = computed(() => sbs.value.reduce((s, sb) => s + (sb.duratio
 const selectedSb = ref(null)
 const shotPromptDrafts = ref({})
 const savingShotPromptIds = ref([])
+const videoPromptDrafts = ref({})
+const savingVideoPromptIds = ref([])
+const fieldDrafts = ref({})
+const savingFieldKeys = ref([])
+const dubbingDrafts = ref({})
+const savingDubbingIds = ref([])
+const scenePromptDrafts = ref({})
+const savingScenePromptIds = ref([])
+const charVoiceDrafts = ref({})
+const savingCharVoiceIds = ref([])
+const charPromptDrafts = ref({})
+const savingCharPromptIds = ref([])
 const shotTypes = [
   '大远景', '远景', '全景', '中景', '中近景', '近景', '特写', '大特写',
   '双人镜头', '三人镜头', '群像', '背影', '侧面', '正面', '俯视', '仰视',
@@ -3261,13 +3779,108 @@ const shotTypes = [
 const shotAngles = ['平视', '仰视', '俯视', '侧拍', '背拍', '斜侧', '主观视角', '过肩']
 const shotMovements = ['固定', '推镜', '拉镜', '摇镜', '移镜', '跟拍', '升降', '手持', '环绕']
 
+function rawStoryboardNumber(sb, fallbackIndex = 0) {
+  const value = Number(sb?.storyboard_number ?? sb?.storyboardNumber)
+  return Number.isFinite(value) && value > 0 ? value : fallbackIndex + 1
+}
+
+function formatStoryboardNumber(sb, fallbackIndex = 0) {
+  const value = rawStoryboardNumber(sb, fallbackIndex)
+  const base = Math.trunc(value)
+  const sub = Math.round((value - base) * 100)
+  const baseLabel = String(base || fallbackIndex + 1).padStart(2, '0')
+  return sub > 0 ? `${baseLabel}-${String(sub).padStart(2, '0')}` : baseLabel
+}
+
+function nextAppendStoryboardNumber() {
+  if (!sbs.value.length) return 1
+  const roots = sbs.value.map((sb, index) => Math.trunc(rawStoryboardNumber(sb, index))).filter(Boolean)
+  return Math.max(...roots, 0) + 1
+}
+
+function storyboardFieldKey(sb, field) {
+  return `${sb?.id || 'new'}:${field}`
+}
+
+function normalizeFieldValue(field, value) {
+  if (field === 'duration') return Number(value || 0) || 0
+  if (field === 'scene_id') return value == null || value === '' ? null : Number(value)
+  if (field === 'character_ids') return Array.isArray(value) ? value.map(Number).filter(Boolean) : []
+  return String(value ?? '')
+}
+
+function getStoryboardFieldValue(sb, field) {
+  const current = field === 'character_ids'
+    ? getStoryboardCharacterIds(sb)
+    : (sb?.[field] ?? sb?.[toCamel(field)])
+  return normalizeFieldValue(field, current)
+}
+
+function getFieldDraft(sb, field) {
+  if (!sb?.id) return getStoryboardFieldValue(sb, field)
+  const key = storyboardFieldKey(sb, field)
+  if (Object.prototype.hasOwnProperty.call(fieldDrafts.value, key)) return fieldDrafts.value[key]
+  return getStoryboardFieldValue(sb, field)
+}
+
+function setFieldDraft(sb, field, value) {
+  if (!sb?.id) return
+  fieldDrafts.value = {
+    ...fieldDrafts.value,
+    [storyboardFieldKey(sb, field)]: normalizeFieldValue(field, value),
+  }
+}
+
+function isFieldDirty(sb, field) {
+  if (!sb?.id) return false
+  const key = storyboardFieldKey(sb, field)
+  if (!Object.prototype.hasOwnProperty.call(fieldDrafts.value, key)) return false
+  return JSON.stringify(normalizeFieldValue(field, fieldDrafts.value[key])) !== JSON.stringify(getStoryboardFieldValue(sb, field))
+}
+
+function isFieldSaving(sb, field) {
+  return savingFieldKeys.value.includes(storyboardFieldKey(sb, field))
+}
+
+function clearFieldDraft(sb, field) {
+  const key = storyboardFieldKey(sb, field)
+  const { [key]: _drop, ...rest } = fieldDrafts.value
+  fieldDrafts.value = rest
+}
+
+function cancelFieldDraft(sb, field) {
+  clearFieldDraft(sb, field)
+  toast.info('已取消修改')
+}
+
+async function confirmFieldDraft(sb, field, options = {}) {
+  if (!sb?.id) return
+  if (!isFieldDirty(sb, field)) {
+    clearFieldDraft(sb, field)
+    if (!options.silent) toast.info('内容已是最新')
+    return
+  }
+  const key = storyboardFieldKey(sb, field)
+  const value = normalizeFieldValue(field, fieldDrafts.value[key])
+  if (!savingFieldKeys.value.includes(key)) savingFieldKeys.value.push(key)
+  try {
+    sb[field] = value
+    const camelField = toCamel(field)
+    if (camelField !== field) sb[camelField] = value
+    await storyboardAPI.update(sb.id, { [field]: value })
+    clearFieldDraft(sb, field)
+    if (!options.silent) toast.success('修改已确认')
+  } catch (e) {
+    toast.error(e.message)
+    await refresh()
+  } finally {
+    savingFieldKeys.value = savingFieldKeys.value.filter(item => item !== key)
+  }
+}
+
 function updateField(sb, field, value) {
-  const current = sb[field] ?? sb[toCamel(field)]
-  if (current === value) return
-  sb[field] = value
-  const camelField = toCamel(field)
-  if (camelField !== field) sb[camelField] = value
-  storyboardAPI.update(sb.id, { [field]: value })
+  setFieldDraft(sb, field, value)
+  return confirmFieldDraft(sb, field, { silent: true })
 }
 
 function getShotImagePromptValue(sb) {
@@ -3301,6 +3914,49 @@ function isSavingShotPrompt(sb) {
   return !!sb?.id && savingShotPromptIds.value.includes(sb.id)
 }
 
+function cancelShotImagePrompt(sb) {
+  if (!sb?.id) return
+  const key = String(sb.id)
+  const { [key]: _drop, ...rest } = shotPromptDrafts.value
+  shotPromptDrafts.value = rest
+  toast.info('已取消首帧提示词修改')
+}
+
+function getVideoPromptValue(sb) {
+  return String(sb?.video_prompt || sb?.videoPrompt || '').trim()
+}
+
+function getVideoPromptDraft(sb) {
+  if (!sb?.id) return ''
+  const key = String(sb.id)
+  if (Object.prototype.hasOwnProperty.call(videoPromptDrafts.value, key)) return videoPromptDrafts.value[key]
+  return getVideoPromptValue(sb)
+}
+
+function setVideoPromptDraft(sb, value) {
+  if (!sb?.id) return
+  videoPromptDrafts.value = { ...videoPromptDrafts.value, [String(sb.id)]: value }
+}
+
+function isVideoPromptDirty(sb) {
+  if (!sb?.id) return false
+  const key = String(sb.id)
+  if (!Object.prototype.hasOwnProperty.call(videoPromptDrafts.value, key)) return false
+  return String(videoPromptDrafts.value[key] || '').trim() !== getVideoPromptValue(sb)
+}
+
+function isSavingVideoPrompt(sb) {
+  return !!sb?.id && savingVideoPromptIds.value.includes(sb.id)
+}
+
+function cancelShotVideoPrompt(sb) {
+  if (!sb?.id) return
+  const key = String(sb.id)
+  const { [key]: _drop, ...rest } = videoPromptDrafts.value
+  videoPromptDrafts.value = rest
+  toast.info('已取消视频提示词修改')
+}
+
 async function saveShotImagePrompt(sb, options = {}) {
   if (!sb?.id) return
   const next = String(getShotPromptDraft(sb) || '').trim()
@@ -3330,6 +3986,35 @@ async function saveShotImagePrompt(sb, options = {}) {
   }
 }
 
+async function saveShotVideoPrompt(sb, options = {}) {
+  if (!sb?.id) return
+  const next = String(getVideoPromptDraft(sb) || '').trim()
+  const current = getVideoPromptValue(sb)
+  if (next === current) {
+    const key = String(sb.id)
+    if (Object.prototype.hasOwnProperty.call(videoPromptDrafts.value, key)) {
+      const { [key]: _drop, ...rest } = videoPromptDrafts.value
+      videoPromptDrafts.value = rest
+    }
+    if (!options.silent) toast.info('视频提示词已是最新')
+    return
+  }
+  if (!savingVideoPromptIds.value.includes(sb.id)) savingVideoPromptIds.value.push(sb.id)
+  try {
+    sb.video_prompt = next
+    sb.videoPrompt = next
+    await storyboardAPI.update(sb.id, { video_prompt: next })
+    const key = String(sb.id)
+    const { [key]: _drop, ...rest } = videoPromptDrafts.value
+    videoPromptDrafts.value = rest
+    if (!options.silent) toast.success('视频提示词已保存')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    savingVideoPromptIds.value = savingVideoPromptIds.value.filter(id => id !== sb.id)
+  }
+}
+
 function toCamel(field) {
   return field.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
 }
@@ -3348,11 +4033,11 @@ function isStoryboardCharacterSelected(sb, charId) {
 }
 
 function toggleStoryboardCharacter(sb, charId) {
-  const currentIds = getStoryboardCharacterIds(sb)
+  const currentIds = getFieldDraft(sb, 'character_ids')
   const nextIds = currentIds.includes(charId)
     ? currentIds.filter(id => id !== charId)
     : [...currentIds, charId]
-  updateField(sb, 'character_ids', nextIds)
+  setFieldDraft(sb, 'character_ids', nextIds)
 }
 
 function getSceneName(sb) {
@@ -3400,6 +4085,7 @@ async function refresh() {
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = await episodeAPI.storyboards(ep.id)
+      try { dubbings.value = await storyboardAPI.listDubbings(ep.id) } catch { dubbings.value = [] }
       if (sbs.value.length) {
         selectedSb.value = selectedSb.value
           ? (sbs.value.find(sb => sb.id === selectedSb.value.id) || sbs.value[0])
@@ -3517,7 +4203,23 @@ async function genSample(id) {
     toast.error(e.message)
   }
 }
-async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
+async function addShot(afterSb = selectedSb.value) {
+  const insertAfter = afterSb?.id ? afterSb : null
+  const nextNumber = insertAfter ? rawStoryboardNumber(insertAfter, sbs.value.indexOf(insertAfter)) : nextAppendStoryboardNumber()
+  try {
+    const created = await storyboardAPI.create({
+      episode_id: epId.value,
+      storyboard_number: nextNumber,
+      insert_after_id: insertAfter?.id || undefined,
+      duration: insertAfter?.duration || 10,
+    })
+    selectedSb.value = created
+    await refresh()
+    toast.success(insertAfter ? `已在 #${formatStoryboardNumber(insertAfter, sbs.value.indexOf(insertAfter))} 下方插入分镜` : '已添加分镜')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -3582,6 +4284,11 @@ function pollAssetImageGeneration(genId, kind, id) {
 }
 
 async function genCharImg(id) {
+  const char = chars.value.find(item => Number(item.id) === Number(id))
+  if (char && isCharacterPromptDirty(char)) {
+    toast.warning('请先确认角色图片提示词修改，再生成角色图')
+    return
+  }
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     const res = await characterAPI.generateImage(id, epId.value, activeCharacterImageConfig.value?.id)
@@ -3628,6 +4335,11 @@ function startCharacterImageBatch(ids) {
   })
 }
 async function genSceneImg(id) {
+  const scene = scenes.value.find(item => Number(item.id) === Number(id))
+  if (scene && isScenePromptDirty(scene)) {
+    toast.warning('请先确认场景提示词修改，再生成场景图')
+    return
+  }
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     const res = await sceneAPI.generateImage(id, epId.value, activeSceneImageConfig.value?.id)
@@ -3743,6 +4455,207 @@ function getDialogueSpeaker(sb) {
   if (!speaker) return '旁白'
   return speaker
 }
+
+function isDubbingIgnorable(dub) {
+  const text = String(dub?.text || '').trim()
+  if (!text) return true
+  if (IGNORE_TTS_TEXT.test(text)) return true
+  const speaker = String(dub?.speaker_name || dub?.speakerName || '').trim()
+  if (speaker && IGNORE_TTS_SPEAKERS.test(speaker)) return true
+  return false
+}
+
+function hasDubbingTTS(dub) { return !!getDubbingTTSUrl(dub) }
+function getDubbingTTSUrl(dub) { return dub?.audio_url || dub?.audioUrl || '' }
+function isDubbingPending(id) { return isTTSPending(id) }
+function dubbingShot(dub) {
+  return sbs.value.find(sb => Number(sb.id) === Number(dub?.storyboard_id || dub?.storyboardId))
+}
+function dubbingShotLabel(dub) {
+  const sb = dubbingShot(dub)
+  const index = sb ? sbs.value.findIndex(item => Number(item.id) === Number(sb.id)) : -1
+  return sb ? formatStoryboardNumber(sb, index) : String(dub?.storyboard_number || dub?.storyboardNumber || '--')
+}
+
+function dubbingDraftKey(dub) {
+  return String(dub?.id || '')
+}
+
+function getDubbingDraft(dub) {
+  if (!dub?.id) return {}
+  return dubbingDrafts.value[dubbingDraftKey(dub)] || {}
+}
+
+function getDubbingDraftValue(dub, field) {
+  const draft = getDubbingDraft(dub)
+  if (Object.prototype.hasOwnProperty.call(draft, field)) return draft[field]
+  if (field === 'storyboard_id') return dub.storyboard_id || dub.storyboardId || null
+  if (field === 'character_id') return dub.character_id || dub.characterId || null
+  return dub[field] ?? dub[toCamel(field)] ?? ''
+}
+
+function setDubbingDraft(dub, patch) {
+  if (!dub?.id) return
+  const key = dubbingDraftKey(dub)
+  dubbingDrafts.value = {
+    ...dubbingDrafts.value,
+    [key]: { ...(dubbingDrafts.value[key] || {}), ...patch },
+  }
+}
+
+function isDubbingDirty(dub) {
+  if (!dub?.id) return false
+  const draft = getDubbingDraft(dub)
+  return Object.keys(draft).some((field) => JSON.stringify(draft[field] ?? '') !== JSON.stringify(dub[field] ?? dub[toCamel(field)] ?? ''))
+}
+
+function isDubbingSaving(dub) {
+  return !!dub?.id && savingDubbingIds.value.includes(dub.id)
+}
+
+function clearDubbingDraft(dub) {
+  const key = dubbingDraftKey(dub)
+  const { [key]: _drop, ...rest } = dubbingDrafts.value
+  dubbingDrafts.value = rest
+}
+
+function cancelDubbingDraft(dub) {
+  clearDubbingDraft(dub)
+  toast.info('已取消配音修改')
+}
+
+async function confirmDubbingDraft(dub, options = {}) {
+  if (!dub?.id || !isDubbingDirty(dub)) {
+    clearDubbingDraft(dub)
+    return
+  }
+  const patch = getDubbingDraft(dub)
+  if (!savingDubbingIds.value.includes(dub.id)) savingDubbingIds.value.push(dub.id)
+  try {
+    const updated = await storyboardAPI.updateDubbing(dub.id, patch)
+    const nextIndex = dubbings.value.findIndex(item => Number(item.id) === Number(dub.id))
+    if (nextIndex >= 0) dubbings.value.splice(nextIndex, 1, updated)
+    clearDubbingDraft(dub)
+    if (!options.silent) toast.success('配音修改已确认')
+  } catch (e) {
+    toast.error(e.message)
+    await refresh()
+  } finally {
+    savingDubbingIds.value = savingDubbingIds.value.filter(id => id !== dub.id)
+  }
+}
+
+async function updateDubbing(dub, patch, options = {}) {
+  if (!dub?.id) return
+  const optimistic = { ...dub, ...patch }
+  const index = dubbings.value.findIndex(item => Number(item.id) === Number(dub.id))
+  if (index >= 0) dubbings.value.splice(index, 1, optimistic)
+  try {
+    const updated = await storyboardAPI.updateDubbing(dub.id, patch)
+    const nextIndex = dubbings.value.findIndex(item => Number(item.id) === Number(dub.id))
+    if (nextIndex >= 0) dubbings.value.splice(nextIndex, 1, updated)
+    if (!options.silent) toast.success('配音已保存')
+  } catch (e) {
+    toast.error(e.message)
+    await refresh()
+  }
+}
+
+async function addDubbing(afterDub = null) {
+  if (!sbs.value.length) {
+    toast.info('请先创建分镜')
+    return
+  }
+  const storyboardId = afterDub?.storyboard_id || afterDub?.storyboardId || selectedSb.value?.id || sbs.value[0].id
+  const character = chars.value.find(c => !isNarratorCharacter(c)) || chars.value[0]
+  try {
+    const created = await storyboardAPI.createDubbing({
+      episode_id: epId.value,
+      storyboard_id: storyboardId,
+      insert_after_id: afterDub?.id || undefined,
+      character_id: character?.id || null,
+      speaker_name: character?.name || '旁白',
+      voice_id: character?.voice_style || character?.voiceStyle || '',
+      text: '新配音台词',
+    })
+    await refresh()
+    toast.success(`已添加 #${dubbingShotLabel(created)} 配音`)
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function deleteDubbing(dub) {
+  if (!confirm('确定删除这条配音？')) return
+  try {
+    await storyboardAPI.deleteDubbing(dub.id)
+    dubbings.value = dubbings.value.filter(item => Number(item.id) !== Number(dub.id))
+    toast.success('配音已删除')
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function createVoiceCharacter() {
+  const name = newVoiceCharacterName.value.trim()
+  if (!name) {
+    toast.info('请输入角色名称')
+    return
+  }
+  try {
+    const created = await characterAPI.create({
+      drama_id: dramaId,
+      episode_id: epId.value,
+      name,
+      role: '角色',
+      description: '手动添加的角色，可在这里补充声音设计提示词。',
+      voice_style: '',
+      voice_provider: 'manual',
+    })
+    newVoiceCharacterName.value = ''
+    await refresh()
+    toast.success(`已添加角色「${created?.name || name}」`)
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function deleteVoiceCharacter(char) {
+  if (!char?.id) return
+  if (!confirm(`确定删除「${char.name}」的角色设计？相关分镜绑定和配音选择可能需要重新检查。`)) return
+  try {
+    await characterAPI.del(char.id)
+    chars.value = chars.value.filter(item => Number(item.id) !== Number(char.id))
+    toast.success(`已删除角色「${char.name}」`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
+
+async function genDubbingTTS(dub) {
+  if (audioSkipped.value) {
+    toast.info('当前已跳过配音生成')
+    return
+  }
+  if (isDubbingDirty(dub)) {
+    toast.warning('请先确认配音修改，再生成语音')
+    return
+  }
+  if (isDubbingPending(dub.id)) return
+  markTTSPending(dub.id)
+  toast.info(`#${dubbingShotLabel(dub)} 配音生成中`)
+  try {
+    await storyboardAPI.generateDubbingTTS(dub.id, activeAudioCloneConfig.value?.id)
+    toast.success(`#${dubbingShotLabel(dub)} 配音已生成`)
+    await refresh()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    clearTTSPending(dub.id)
+  }
+}
+
 async function genShotTTS(sb) {
   if (audioSkipped.value) {
     toast.info('当前已跳过配音生成')
@@ -3750,10 +4663,11 @@ async function genShotTTS(sb) {
   }
   if (isTTSPending(sb.id)) return
   markTTSPending(sb.id)
-  toast.info(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音生成中`)
+  const label = formatStoryboardNumber(sb, sbs.value.findIndex(item => item.id === sb.id))
+  toast.info(`镜头 #${label} 配音生成中`)
   try {
     await storyboardAPI.generateTTS(sb.id, activeAudioCloneConfig.value?.id)
-    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
+    toast.success(`镜头 #${label} 配音已生成`)
     await refresh()
     clearTTSPending(sb.id)
   } catch (e) {
@@ -3766,14 +4680,14 @@ async function batchShotTTS() {
     toast.info('当前已跳过配音生成')
     return
   }
-  const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
+  const pending = dubbings.value.filter(dub => !isDubbingIgnorable(dub) && !hasDubbingTTS(dub))
   if (!pending.length) {
     toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
     return
   }
-  pending.forEach(sb => markTTSPending(sb.id))
+  pending.forEach(dub => markTTSPending(dub.id))
   toast.info(`正在生成 ${pending.length} 条镜头配音`)
-  const results = await Promise.allSettled(pending.map(sb => storyboardAPI.generateTTS(sb.id, activeAudioCloneConfig.value?.id)))
+  const results = await Promise.allSettled(pending.map(dub => storyboardAPI.generateDubbingTTS(dub.id, activeAudioCloneConfig.value?.id)))
   const okCount = results.filter(r => r.status === 'fulfilled').length
   const failCount = results.length - okCount
   results.forEach((result, index) => {
@@ -3782,9 +4696,9 @@ async function batchShotTTS() {
   if (okCount) toast.success(`已生成 ${okCount} 条镜头配音`)
   if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
   await refresh()
-  pending.forEach(sb => {
-    const latest = sbs.value.find(item => Number(item.id) === Number(sb.id))
-    if (latest && hasTTS(latest)) clearTTSPending(sb.id)
+  pending.forEach(dub => {
+    const latest = dubbings.value.find(item => Number(item.id) === Number(dub.id))
+    if (latest && hasDubbingTTS(latest)) clearTTSPending(dub.id)
   })
 }
 
@@ -3798,65 +4712,80 @@ function hasVid(s) { return !!getVideoUrl(s) }
 function hasComposed(s) { return !!getComposedVideoUrl(s) }
 
 function getShotReferenceImages(sb) {
-  return getShotReferenceAssets(sb).map(item => item.path).filter(Boolean).slice(0, 6)
+  return getReadyShotReferenceAssets(sb).map(item => item.path)
 }
 
 function getShotReferenceAssets(sb) {
-  const refs = []
-  const pushRef = (asset) => {
-    if (!asset?.label || refs.length >= 8) return
-    const duplicate = refs.some(item => {
+  const characterRefs = []
+  const sceneRefs = []
+  const manualRefs = []
+  const pushRef = (target, asset) => {
+    if (!asset?.label || [...characterRefs, ...sceneRefs, ...manualRefs].length >= 8) return
+    const duplicate = [...characterRefs, ...sceneRefs, ...manualRefs].some(item => {
       if (asset.path && item.path) return item.path === asset.path
       return item.type === asset.type && item.label === asset.label
     })
     if (duplicate) return
-    refs.push(asset)
+    target.push(asset)
+  }
+  for (const charId of getStoryboardCharacterIds(sb)) {
+    const char = chars.value.find(item => item.id === charId)
+    pushRef(characterRefs, { type: 'character', label: `@${char?.name || '角色'}`, path: char?.image_url || char?.imageUrl, ready: !!(char?.image_url || char?.imageUrl) })
   }
   const sceneId = sb?.scene_id || sb?.sceneId
   const scene = scenes.value.find(item => item.id === sceneId)
-  pushRef({ type: 'scene', label: `@${scene?.location || '场景'}`, path: scene?.image_url || scene?.imageUrl, ready: !!(scene?.image_url || scene?.imageUrl) })
-  for (const charId of getStoryboardCharacterIds(sb)) {
-    const char = chars.value.find(item => item.id === charId)
-    pushRef({ type: 'character', label: `@${char?.name || '角色'}`, path: char?.image_url || char?.imageUrl, ready: !!(char?.image_url || char?.imageUrl) })
-  }
+  pushRef(sceneRefs, { type: 'scene', label: `@${scene?.location || '场景'}`, path: scene?.image_url || scene?.imageUrl, ready: !!(scene?.image_url || scene?.imageUrl) })
   for (const [index, refPath] of getRefs(sb).entries()) {
-    pushRef({ type: 'manual', label: `@参考${index + 1}`, path: refPath, ready: !!refPath })
+    pushRef(manualRefs, { type: 'manual', label: `@参考${index + 1}`, path: refPath, ready: !!refPath })
   }
-  const first = getFirstFrame(sb)
-  const last = getLastFrame(sb)
-  pushRef({ type: 'frame', label: '@首帧', path: first, ready: !!first })
-  pushRef({ type: 'frame', label: '@尾帧', path: last, ready: !!last })
-  return refs
+  return [...characterRefs, ...manualRefs, ...sceneRefs].slice(0, 8)
+}
+
+function getReadyShotReferenceAssets(sb) {
+  return getShotReferenceAssets(sb).filter(item => item.path).slice(0, 6)
+}
+
+function cleanReferenceLabel(label) {
+  return String(label || '').replace(/^@/, '').trim()
+}
+
+function labelWithImageIndex(label, assets, type) {
+  const cleanLabel = cleanReferenceLabel(label)
+  const readyAssets = assets.filter(asset => asset.path).slice(0, 6)
+  const index = readyAssets.findIndex(asset => asset.type === type && cleanReferenceLabel(asset.label) === cleanLabel)
+  return index >= 0 ? `${cleanLabel}（图${index + 1}）` : cleanLabel
+}
+
+function annotatePromptEntityNames(text, names, assets, type) {
+  let result = String(text || '')
+  for (const name of names.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const replacement = labelWithImageIndex(name, assets, type)
+    result = result.replace(new RegExp(`${escaped}(?!（图\\d+）)`, 'g'), replacement)
+  }
+  return result
 }
 
 function buildShotImagePrompt(sb, frameType) {
-  const title = sb.title || ''
-  const description = sb.image_prompt || sb.imagePrompt || sb.description || ''
-  const shotType = sb.shot_type || sb.shotType || ''
-  const angle = sb.angle || ''
-  const movement = sb.movement || ''
-  const location = sb.location || getSceneName(sb)
-  const time = sb.time || ''
-  const charactersText = getStoryboardCharacterNames(sb).join('、')
-  const action = sb.action || ''
-  const atmosphere = sb.atmosphere || ''
-  const frameHint = frameType === 'first_frame'
-    ? '生成这个镜头的起始关键帧，突出建立关系和动作开始瞬间'
-    : '生成这个镜头的结束关键帧，突出动作结束、情绪落点或结果状态'
-
-  return [
-    title ? `镜头标题：${title}` : '',
-    description ? `画面描述：${description}` : '',
-    shotType ? `景别：${shotType}` : '',
-    angle ? `机位：${angle}` : '',
-    movement ? `运镜：${movement}` : '',
-    charactersText ? `角色：${charactersText}` : '',
-    location ? `地点：${location}` : '',
-    time ? `时间：${time}` : '',
-    action ? `动作：${action}` : '',
-    atmosphere ? `氛围：${atmosphere}` : '',
-    frameHint,
-  ].filter(Boolean).join('；')
+  const shotType = String(sb.shot_type || sb.shotType || '').trim()
+  const imagePrompt = String(sb.image_prompt || sb.imagePrompt || '').trim()
+  const assets = getReadyShotReferenceAssets(sb)
+  const characterNames = assets.filter(asset => asset.type === 'character').map(asset => cleanReferenceLabel(asset.label))
+  const sceneNames = assets.filter(asset => asset.type === 'scene').map(asset => cleanReferenceLabel(asset.label))
+  let prompt = [shotType, imagePrompt].filter(Boolean).join('，')
+  prompt = annotatePromptEntityNames(prompt, characterNames, assets, 'character')
+  prompt = annotatePromptEntityNames(prompt, sceneNames, assets, 'scene')
+  const guide = assets
+    .map((asset, index) => {
+      const label = cleanReferenceLabel(asset.label)
+      return label ? `${label}=图${index + 1}` : ''
+    })
+    .filter(Boolean)
+    .join('，')
+  if (guide) {
+    prompt = `${prompt}。参考图对应关系：${guide}。画面中的角色外貌必须严格对应各自参考图，场景质感参考对应场景图，不要混淆人物身份。`
+  }
+  return prompt
 }
 
 function shotFrameTargets() {
@@ -3930,7 +4859,10 @@ function startShotFrameBatch(targets) {
 }
 
 async function requestShotFrameGeneration(sb, frameType) {
-  if (isShotPromptDirty(sb)) await saveShotImagePrompt(sb, { silent: true })
+  if (isShotPromptDirty(sb)) {
+    toast.warning('请先确认首帧图片提示词修改，再生成图片')
+    return
+  }
   const prompt = buildShotImagePrompt(sb, frameType)
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
@@ -3984,6 +4916,15 @@ function pollShotFrameGeneration(generationId, storyboardId, frameType) {
 }
 
 async function genVid(sb) {
+  if (isVideoPromptDirty(sb)) {
+    toast.warning('请先确认视频提示词修改，再生成视频')
+    return
+  }
+  const dirtyFields = ['duration', 'shot_type', 'movement', 'angle'].filter(field => isFieldDirty(sb, field))
+  if (dirtyFields.length) {
+    toast.warning('请先确认镜头结构修改，再生成视频')
+    return
+  }
   const capabilities = videoReferenceCapabilities(activeVideoConfig.value)
   const params = {
     storyboard_id: sb.id,
@@ -4010,6 +4951,13 @@ async function genVid(sb) {
     pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
     toast.error(e.message)
   }
+}
+async function genShotVideo(sb) {
+  if (!getFirstFrame(sb)) {
+    toast.warning('请先生成或上传首帧')
+    return
+  }
+  await genVid(sb)
 }
 async function pollVideoGeneration(generationId, storyboardId) {
   const pollKey = `${generationId || 'storyboard'}:${storyboardId}`
@@ -4875,6 +5823,16 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
 }
 .shot-item.active .shot-num { background: var(--accent); color: #fff; }
 .shot-status { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.shot-inline-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
+.shot-item:hover .shot-inline-actions,
+.shot-item.active .shot-inline-actions { opacity: 1; }
+.shot-mini-action {
+  width: 22px; height: 22px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--bg-0); color: var(--text-2);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.shot-mini-action:hover { color: var(--accent); border-color: var(--accent); }
+.shot-mini-action.danger:hover { color: var(--error); border-color: var(--error); }
 .shot-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--bg-3); flex-shrink: 0; }
 .shot-dot.has-img { background: var(--success); }
 .shot-dot.has-video { background: var(--info); }
@@ -4941,6 +5899,52 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
 .detail-head-title { font-size: 14px; font-weight: 700; color: var(--text-0); }
 .detail-head-sub { font-size: 11px; color: var(--text-3); }
 .detail-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.shot-workbench { display: flex; flex-direction: column; gap: 12px; }
+.shot-work-card {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.78);
+  box-shadow: 0 12px 30px rgba(14, 24, 45, 0.04);
+}
+.shot-work-card.compact {
+  grid-template-columns: minmax(220px, 0.48fr) minmax(0, 1fr);
+}
+.shot-work-media {
+  position: relative;
+  aspect-ratio: var(--project-aspect, 16/9);
+  min-height: 180px;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid rgba(27, 41, 64, 0.1);
+  background: linear-gradient(135deg, rgba(18,25,42,0.06), rgba(18,25,42,0.02));
+}
+.shot-work-media.video { background: #05070b; }
+.shot-work-media img,
+.shot-work-media video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.shot-work-empty {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); font-size: 13px; font-weight: 600;
+}
+.shot-work-actions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+}
+.shot-work-copy { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.shot-work-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.shot-work-title { font-size: 14px; font-weight: 800; color: var(--text-0); }
+.shot-work-sub { margin-top: 2px; font-size: 11px; color: var(--text-3); }
+.shot-work-prompt { flex: 1; }
+.shot-work-prompt .mini-textarea { min-height: 112px; background: rgba(255,255,255,0.9); }
+.shot-work-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.shot-work-foot .prompt-lock-state { margin-right: auto; }
 .detail-hero {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.9fr);
@@ -5049,6 +6053,17 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
 .field-grid { display: grid; gap: 12px; }
 .field-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.field-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 800;
+}
+.field-edit-actions span { margin-right: auto; }
 .locked-config {
   display: inline-flex;
   align-items: center;
@@ -5065,6 +6080,12 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
   margin-bottom: 8px;
   font-size: 12px;
   color: var(--text-2);
+}
+.compact-input {
+  width: 150px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 .storyboard-model-picker {
   display: inline-flex;
@@ -5135,14 +6156,23 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
 
 .dub-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
   gap: 12px;
   align-items: stretch;
 }
-.dub-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 20px; background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58)); min-height: 190px; }
+.dub-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 12px; background: linear-gradient(180deg, rgba(255,255,255,0.74), rgba(248,251,255,0.58)); min-height: 230px; }
 .dub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.dub-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.dub-copy { min-width: 0; display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .dub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dubbing-control-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.35fr) minmax(180px, 1fr);
+  gap: 8px;
+}
+@media (max-width: 760px) {
+  .dub-grid { grid-template-columns: 1fr; }
+  .dubbing-control-grid { grid-template-columns: 1fr; }
+}
 .dub-desc {
   font-size: 13px; line-height: 1.6; color: var(--text-1);
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
@@ -5907,6 +6937,11 @@ onMounted(() => { restoreAudioSkip(); restoreAudioPendingState(); refresh(); loa
   }
 
   .detail-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .shot-work-card,
+  .shot-work-card.compact {
     grid-template-columns: 1fr;
   }
 

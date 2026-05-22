@@ -10,7 +10,6 @@ import { v4 as uuid } from 'uuid'
 import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
-import { generateTTS, voiceSampleText } from './tts-generation.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -53,6 +52,34 @@ function hasAudioStream(filePath: string): Promise<boolean> {
   })
 }
 
+function getMediaDuration(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        resolve(0)
+        return
+      }
+      const formatDuration = Number(metadata.format?.duration || 0)
+      const streamDuration = Math.max(
+        0,
+        ...(metadata.streams || []).map((stream: any) => Number(stream.duration || 0)).filter(Number.isFinite),
+      )
+      resolve(Math.max(formatDuration, streamDuration, 0))
+    })
+  })
+}
+
+function formatSrtTime(seconds: number) {
+  const totalMs = Math.max(0, Math.floor(seconds * 1000))
+  const ms = totalMs % 1000
+  const totalSeconds = Math.floor(totalMs / 1000)
+  const s = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  const m = totalMinutes % 60
+  const h = Math.floor(totalMinutes / 60)
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
+}
+
 function parseDialogueForTTS(dialogue?: string | null) {
   const raw = dialogue?.trim() || ''
   if (!raw) return { speaker: '', pureText: '', ignorable: true }
@@ -61,6 +88,55 @@ function parseDialogueForTTS(dialogue?: string | null) {
   const pureText = raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').trim()
   const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
   return { speaker, pureText, ignorable }
+}
+
+function activeDubbingRowsForStoryboard(storyboardId: number) {
+  return db.select().from(schema.storyboardDubbings)
+    .where(eq(schema.storyboardDubbings.storyboardId, storyboardId))
+    .all()
+    .filter((row: any) => !row.deletedAt)
+    .sort((a: any, b: any) => (Number(a.sortOrder || 0) - Number(b.sortOrder || 0)) || (Number(a.id) - Number(b.id)))
+}
+
+function getDubbingSegments(sb: any) {
+  const rows = activeDubbingRowsForStoryboard(sb.id)
+  if (rows.length) {
+    return rows
+      .map((row: any) => ({
+        id: row.id,
+        speaker: row.speakerName || '',
+        text: String(row.text || '').trim(),
+        audioUrl: row.audioUrl || '',
+      }))
+      .filter((row: any) => row.text && !IGNORE_TTS_TEXT.test(row.text))
+  }
+
+  const parsedDialogue = parseDialogueForTTS(sb.dialogue)
+  if (parsedDialogue.ignorable) return []
+  return [{
+    id: 0,
+    speaker: parsedDialogue.speaker,
+    text: parsedDialogue.pureText,
+    audioUrl: sb.ttsAudioUrl || '',
+  }]
+}
+
+function concatAudioFiles(audioPaths: string[]): Promise<string> {
+  if (audioPaths.length === 1) return Promise.resolve(audioPaths[0])
+  const outputDir = path.join(STORAGE_ROOT, 'audio')
+  fs.mkdirSync(outputDir, { recursive: true })
+  const outputPath = path.join(outputDir, `${uuid()}.m4a`)
+  return new Promise((resolve, reject) => {
+    let cmd = ffmpeg()
+    audioPaths.forEach((audioPath) => { cmd = cmd.input(audioPath) })
+    const inputs = audioPaths.map((_, index) => `[${index}:a]`).join('')
+    cmd.complexFilter([`${inputs}concat=n=${audioPaths.length}:v=0:a=1[aout]`])
+      .outputOptions(['-map', '[aout]', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k'])
+      .output(outputPath)
+      .on('end', () => resolve(outputPath))
+      .on('error', reject)
+      .run()
+  })
 }
 
 /**
@@ -85,12 +161,32 @@ export async function composeStoryboard(storyboardId: number, options: ComposeOp
   const videoPath = toAbsPath(sb.videoUrl)
   let audioPath: string | null = null
   let subtitlePath: string | null = null
-  const parsedDialogue = parseDialogueForTTS(sb.dialogue)
+  const dubbingSegments = getDubbingSegments(sb)
 
-  // 1. 生成 TTS 音频（如果有对白）
+  // 1. 只读取配音生成阶段已经产出的 TTS 音频。合成阶段不再临时生成 TTS，
+  // 避免长耗时 TTS 任务阻塞视频合成和最终拼接。
   try {
-    if (!parsedDialogue.ignorable) {
-      if (sb.ttsAudioUrl) {
+    if (dubbingSegments.length) {
+      const audioPaths: string[] = []
+      for (const segment of dubbingSegments) {
+        if (segment.audioUrl) {
+          const existingAudioPath = toAbsPath(segment.audioUrl)
+          if (fs.existsSync(existingAudioPath)) {
+            audioPaths.push(existingAudioPath)
+            continue
+          }
+        }
+        logTaskError('ComposeTask', 'missing-tts-audio', {
+          storyboardId,
+          speaker: segment.speaker,
+          textPreview: segment.text.slice(0, 40),
+        })
+        throw new Error(`镜头 ${sb.storyboardNumber || storyboardId} 有台词但缺少配音音频，请先在“配音生成”步骤生成 TTS`)
+      }
+
+      if (audioPaths.length) {
+        audioPath = await concatAudioFiles(audioPaths)
+      } else if (sb.ttsAudioUrl) {
         const existingAudioPath = toAbsPath(sb.ttsAudioUrl)
         if (fs.existsSync(existingAudioPath)) {
           audioPath = existingAudioPath
@@ -98,61 +194,31 @@ export async function composeStoryboard(storyboardId: number, options: ComposeOp
       }
 
       if (!audioPath) {
-        let voiceId = 'alloy'
-        let speakerCharacter: any = null
-        const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-        if (parsedDialogue.speaker) {
-          const charName = parsedDialogue.speaker
-          if (ep) {
-            const chars = db.select().from(schema.characters)
-              .where(eq(schema.characters.dramaId, ep.dramaId)).all()
-            const found = chars.find(c => c.name === charName)
-            if (found) speakerCharacter = found
-            if (found?.voiceStyle) voiceId = found.voiceStyle
-          }
-        }
-
-        const pureDialogue = parsedDialogue.pureText
-        if (pureDialogue) {
-          logTaskProgress('ComposeTask', 'generate-inline-tts', { storyboardId, voiceId, textPreview: pureDialogue.slice(0, 40) })
-          try {
-            const ttsPath = await generateTTS({
-              text: pureDialogue,
-              voice: voiceId,
-              purpose: speakerCharacter?.voiceSampleUrl ? 'clone' : undefined,
-              instruct: speakerCharacter?.voiceStyle || voiceId,
-              refText: speakerCharacter ? voiceSampleText(speakerCharacter.name) : undefined,
-              referenceAudioUrl: speakerCharacter?.voiceSampleUrl || null,
-              configId: ep?.audioConfigId ?? undefined,
-            })
-            audioPath = toAbsPath(ttsPath)
-            db.update(schema.storyboards).set({ ttsAudioUrl: ttsPath, updatedAt: now() })
-              .where(eq(schema.storyboards.id, storyboardId)).run()
-          } catch (err: any) {
-            logTaskError('ComposeTask', 'inline-tts-failed', {
-              storyboardId,
-              reason: err.message || 'TTS generation failed',
-            })
-            throw new Error(`TTS generation failed: ${err.message || 'unknown error'}`)
-          }
-        }
-      }
-
-      if (!audioPath) {
-        throw new Error(`Storyboard ${storyboardId} has dialogue but no TTS audio was generated`)
+        throw new Error(`镜头 ${sb.storyboardNumber || storyboardId} 有台词但缺少配音音频，请先在“配音生成”步骤生成 TTS`)
       }
     }
 
     // 2. 生成字幕文件（SRT）
-    if (!parsedDialogue.ignorable) {
+    if (dubbingSegments.length) {
       const srtDir = path.join(STORAGE_ROOT, 'subtitles')
       fs.mkdirSync(srtDir, { recursive: true })
       const srtFilename = `${uuid()}.srt`
       subtitlePath = path.join(srtDir, srtFilename)
 
-      const duration = sb.duration || 10
-      const pureText = parsedDialogue.pureText
-      const srtContent = `1\n00:00:00,500 --> 00:00:${String(Math.min(duration - 1, 59)).padStart(2, '0')},000\n${pureText}\n`
+      const videoDurationForSubtitle = await getMediaDuration(videoPath)
+      const audioDurationForSubtitle = audioPath ? await getMediaDuration(audioPath) : 0
+      const duration = Math.ceil(Math.max(videoDurationForSubtitle, audioDurationForSubtitle, Number(sb.duration || 10), 1))
+      const segmentDurations = audioPath && dubbingSegments.length > 1
+        ? await Promise.all(dubbingSegments.map(segment => segment.audioUrl ? getMediaDuration(toAbsPath(segment.audioUrl)) : Promise.resolve(0)))
+        : [duration]
+      let cursor = 0.5
+      const srtContent = dubbingSegments.map((segment, index) => {
+        const segmentDuration = Math.max(1, Number(segmentDurations[index] || duration / dubbingSegments.length || 1))
+        const start = cursor
+        const end = Math.min(duration, cursor + segmentDuration)
+        cursor = end
+        return `${index + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(Math.max(start + 0.5, end))}\n${segment.text}\n`
+      }).join('\n')
       fs.writeFileSync(subtitlePath, srtContent, 'utf-8')
 
       const srtRelative = `static/subtitles/${srtFilename}`
@@ -167,6 +233,9 @@ export async function composeStoryboard(storyboardId: number, options: ComposeOp
     const outputPath = path.join(outputDir, outputFilename)
     const keepOriginalAudio = Boolean(options.keepOriginalAudio)
     const sourceHasAudio = keepOriginalAudio ? await hasAudioStream(videoPath) : false
+    const videoDuration = await getMediaDuration(videoPath)
+    const audioDuration = audioPath ? await getMediaDuration(audioPath) : 0
+    const extendVideoBy = Math.max(0, audioDuration - videoDuration)
 
     await new Promise<void>((resolve, reject) => {
       let cmd = ffmpeg(videoPath)
@@ -176,6 +245,10 @@ export async function composeStoryboard(storyboardId: number, options: ComposeOp
       }
 
       const filters: string[] = []
+
+      if (extendVideoBy > 0.05) {
+        filters.push(`tpad=stop_mode=add:stop_duration=${extendVideoBy.toFixed(3)}:color=black`)
+      }
 
       if (subtitlePath && supportsSubtitleFilter()) {
         const escapedPath = subtitlePath
@@ -196,16 +269,20 @@ export async function composeStoryboard(storyboardId: number, options: ComposeOp
       }
 
       const outputOptions = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+      const audioOutputOptions = ['-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k']
+      const audioOutputOptionsWithShortest = [...audioOutputOptions, '-shortest']
 
       if (audioPath && keepOriginalAudio && sourceHasAudio) {
-        cmd = cmd.complexFilter(['[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]'])
-        outputOptions.push('-map', '0:v', '-map', '[aout]', '-c:a', 'aac', '-shortest')
+        cmd = cmd.complexFilter(['[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0[aout]'])
+        outputOptions.push('-map', '0:v', '-map', '[aout]', ...audioOutputOptions)
       } else if (audioPath) {
-        outputOptions.push('-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-shortest')
+        outputOptions.push('-map', '0:v', '-map', '1:a', ...audioOutputOptions)
       } else if (keepOriginalAudio && sourceHasAudio) {
-        outputOptions.push('-map', '0:v', '-map', '0:a?', '-c:a', 'aac', '-shortest')
+        outputOptions.push('-map', '0:v', '-map', '0:a?', ...audioOutputOptions)
       } else {
-        outputOptions.push('-an')
+        cmd = cmd.input('anullsrc=channel_layout=stereo:sample_rate=48000')
+          .inputFormat('lavfi')
+        outputOptions.push('-map', '0:v', '-map', '1:a', ...audioOutputOptionsWithShortest)
       }
 
       cmd.outputOptions(outputOptions)

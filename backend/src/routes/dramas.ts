@@ -10,7 +10,7 @@ import { spawnSync } from 'child_process'
 import { generateWithTextFailover } from '../agents/index.js'
 import { generateImage } from '../services/image-generation.js'
 import { generateVideo } from '../services/video-generation.js'
-import { generateVoiceSample } from '../services/tts-generation.js'
+import { generateTTS, generateVoiceSample, voiceSampleText } from '../services/tts-generation.js'
 import { composeStoryboard } from '../services/ffmpeg-compose.js'
 import { mergeEpisodeVideos } from '../services/ffmpeg-merge.js'
 import { getTextConfigCandidates, type AIConfig } from '../services/ai.js'
@@ -26,6 +26,10 @@ const AUTO_VIDEO_WAIT_ATTEMPTS = 720
 const AUTO_VIDEO_WAIT_DELAY_MS = 5000
 const AUTO_MERGE_WAIT_ATTEMPTS = 360
 const AUTO_MERGE_WAIT_DELAY_MS = 5000
+const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(process.cwd(), '../data/static')
+const BLACK_FRAME_PNG = 'static/images/black-frame.png'
+const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
+const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
 type AutoTarget = typeof AUTO_TARGET_ORDER[number]
 type AutoJob = {
   id: string
@@ -38,7 +42,7 @@ type AutoJob = {
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
   message: string
   detail?: string
-  currentStage?: AutoTarget | 'script' | 'extract' | 'voice_design' | 'voice_samples' | 'character_images' | 'scene_images'
+  currentStage?: AutoTarget | 'script' | 'extract' | 'voice_design' | 'voice_samples' | 'dubbing' | 'character_images' | 'scene_images'
   currentEpisode?: number
   currentEpisodeTitle?: string
   completedEpisodes: number
@@ -455,10 +459,131 @@ function getProjectImageConfigId(drama: any, kind: 'character' | 'scene' | 'shot
   return Number(defaults[key] || defaults.image_config_id || fallback || 0) || undefined
 }
 
+function safeSettings(config: any) {
+  const settings = config?.settings
+  if (!settings) return {}
+  if (typeof settings === 'object') return settings
+  try { return JSON.parse(settings) || {} } catch { return {} }
+}
+
+function firstFiniteNumber(...values: any[]) {
+  for (const value of values) {
+    const num = Number(value)
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  return null
+}
+
+function getProjectVideoConfigId(drama: any, fallback?: number | null) {
+  const metadata = drama.metadata ? safeJson(drama.metadata) : {}
+  const defaults = metadata?.ai_defaults || {}
+  return Number(defaults.video_config_id || fallback || 0) || undefined
+}
+
+function getVideoConfigById(configId?: number | null) {
+  const id = Number(configId || 0)
+  if (!id) return null
+  return db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()[0] || null
+}
+
+function configuredVideoSize(config: any, orientation: string) {
+  const settings = safeSettings(config)
+  const resolution = String(settings.videoResolution ?? settings.video_resolution ?? settings.resolution ?? '').toLowerCase()
+  const preset = resolution === '720p' || resolution === '720'
+    ? { width: 1280, height: 720 }
+    : resolution === '1080p' || resolution === '1080'
+      ? { width: 1920, height: 1080 }
+      : null
+  const width = firstFiniteNumber(preset?.width, settings.defaultWidth, settings.default_width, settings.videoWidth, settings.video_width, settings.width)
+  const height = firstFiniteNumber(preset?.height, settings.defaultHeight, settings.default_height, settings.videoHeight, settings.video_height, settings.height)
+  if (!width || !height) {
+    if (String(config?.provider || '').toLowerCase().startsWith('comfyui')) {
+      return orientation === 'landscape' ? '1920x1080' : '1080x1920'
+    }
+    return orientationVideoSize(orientation)
+  }
+
+  const wide = Math.max(width, height)
+  const narrow = Math.min(width, height)
+  return orientation === 'landscape' ? `${wide}x${narrow}` : `${narrow}x${wide}`
+}
+
+function configuredVideoFps(config: any) {
+  const settings = safeSettings(config)
+  return firstFiniteNumber(settings.fps, settings.defaultFps, settings.default_fps, settings.frameRate, settings.frame_rate)
+}
+
 function getProjectAudioDesignConfigId(drama: any, fallback?: number | null) {
   const metadata = drama.metadata ? safeJson(drama.metadata) : {}
   const defaults = metadata?.ai_defaults || {}
   return Number(defaults.audio_design_config_id || defaults.audio_config_id || fallback || 0) || undefined
+}
+
+function getProjectAudioCloneConfigId(drama: any, fallback?: number | null) {
+  const metadata = drama.metadata ? safeJson(drama.metadata) : {}
+  const defaults = metadata?.ai_defaults || {}
+  return Number(defaults.audio_clone_config_id || defaults.audio_config_id || fallback || 0) || undefined
+}
+
+function parseDialogueForTTS(dialogue?: string | null) {
+  const raw = dialogue?.trim() || ''
+  if (!raw) return { speaker: '', pureText: '', ignorable: true }
+  const monologue = raw.match(/^[（(]\s*([^（）()：:\n]{1,24})\s*(?:独白说|独白|内心独白|内心OS|OS|心声|画外音|旁白)\s*[）)]\s*[：:]+\s*(.+)$/s)
+  const speakerMatch = monologue || raw.match(/^([^：:\n]{1,24})[：:]+\s*(.+)$/s)
+  const speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
+  const pureText = speakerMatch
+    ? speakerMatch[2].replace(/^[：:\s]+/, '').replace(/[（(].+?[)）]/g, '').trim()
+    : raw.replace(/^.+?[:：]+\s*/, '').replace(/^[：:\s]+/, '').replace(/[（(].+?[)）]/g, '').trim()
+  const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
+  return { speaker, pureText, ignorable }
+}
+
+function isGenericNarratorSpeaker(name?: string | null) {
+  return /^(旁白|画外音|narrator|voiceover)$/i.test(String(name || '').trim())
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isVoiceOnlyCharacter(char: any) {
+  return /旁白|画外音|声音角色|系统音/i.test(`${char?.name || ''} ${char?.role || ''}`)
+}
+
+function getStoryboardDialogueCharacters(sb: any, chars: any[]) {
+  const links = db.select().from(schema.storyboardCharacters)
+    .where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
+  const ids = new Set(links.map((link: any) => link.characterId))
+  return chars.filter((char: any) => ids.has(char.id) && !char.deletedAt)
+}
+
+function inferNarratorOwner(sb: any, chars: any[]) {
+  const boundCharacters = getStoryboardDialogueCharacters(sb, chars).filter((char: any) => !isVoiceOnlyCharacter(char))
+  if (boundCharacters.length === 1) return boundCharacters[0]
+
+  const text = [
+    sb.dialogue,
+    sb.description,
+    sb.action,
+    sb.title,
+    sb.result,
+  ].filter(Boolean).join('\n')
+
+  return boundCharacters.find((char: any) => {
+    const name = escapeRegExp(String(char.name || ''))
+    if (!name) return false
+    const nameFirst = new RegExp(`${name}[^。！？!?\n]{0,12}(独白|内心|心声|画外音|旁白)`)
+    const cueFirst = new RegExp(`(独白|内心|心声|画外音|旁白)[^。！？!?\n]{0,12}${name}`)
+    return nameFirst.test(text) || cueFirst.test(text)
+  }) || null
+}
+
+function resolveSpeakerCharacter(sb: any, speaker: string, chars: any[]) {
+  if (isGenericNarratorSpeaker(speaker)) {
+    const narratorOwner = inferNarratorOwner(sb, chars)
+    if (narratorOwner) return narratorOwner
+  }
+  return chars.find((char: any) => !char.deletedAt && char.name === speaker) || null
 }
 
 async function runEpisodeAgent(agentType: string, message: string, dramaId: number, episodeId: number, textConfigId?: number | null, textConfig?: AIConfig | null) {
@@ -508,17 +633,88 @@ async function waitFor<T>(read: () => T, done: (value: T) => boolean, label: str
   throw new Error(`${label} 等待超时`)
 }
 
-function getStoryboardImagePrompt(sb: any) {
-  if (sb.imagePrompt) return String(sb.imagePrompt || '').trim()
+function getStoryboardReferenceAssets(sb: any) {
+  const characterRefs: Array<{ type: string; label: string; path: string }> = []
+  const sceneRefs: Array<{ type: string; label: string; path: string }> = []
+  const pushRef = (target: Array<{ type: string; label: string; path: string }>, type: string, label: string, value?: string | null) => {
+    if (!value || [...characterRefs, ...sceneRefs].some(ref => ref.path === value)) return
+    target.push({ type, label, path: value })
+  }
+  const charLinks = db.select().from(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
+  for (const link of charLinks as any[]) {
+    const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, link.characterId)).all()
+    pushRef(characterRefs, 'character', char?.name || '角色', char?.imageUrl)
+  }
+  if (sb.sceneId) {
+    const [scene] = db.select().from(schema.scenes).where(eq(schema.scenes.id, sb.sceneId)).all()
+    pushRef(sceneRefs, 'scene', scene?.location || '场景', scene?.imageUrl)
+  }
+  return [...characterRefs, ...sceneRefs]
+}
 
-  return [
-    sb.title ? `镜头标题：${sb.title}` : '',
-    sb.description ? `画面描述：${sb.description}` : '',
-    sb.shotType ? `景别：${sb.shotType}` : '',
-    sb.angle ? `机位：${sb.angle}` : '',
-    sb.location ? `地点：${sb.location}` : '',
-    sb.time ? `时间：${sb.time}` : '',
-  ].filter(Boolean).join('；')
+function getReadyStoryboardReferenceAssets(sb: any) {
+  return getStoryboardReferenceAssets(sb).filter(asset => asset.path).slice(0, 8)
+}
+
+function labelWithImageIndex(label: string, assets: Array<{ type: string; label: string; path: string }>, type: string) {
+  const index = assets.findIndex(asset => asset.type === type && asset.label === label && asset.path)
+  return index >= 0 ? `${label}（图${index + 1}）` : label
+}
+
+function annotatePromptEntityNames(text: string, names: string[], assets: Array<{ type: string; label: string; path: string }>, type: string) {
+  let result = String(text || '')
+  for (const name of names.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    result = result.replace(new RegExp(`${escaped}(?!（图\\d+）)`, 'g'), labelWithImageIndex(name, assets, type))
+  }
+  return result
+}
+
+function getStoryboardImagePrompt(sb: any) {
+  const shotType = String(sb.shotType || sb.shot_type || '').trim()
+  const imagePrompt = String(sb.imagePrompt || sb.image_prompt || '').trim()
+  const assets = getReadyStoryboardReferenceAssets(sb)
+  const characterNames = assets.filter(asset => asset.type === 'character').map(asset => asset.label)
+  const sceneNames = assets.filter(asset => asset.type === 'scene').map(asset => asset.label)
+  let prompt = [shotType, imagePrompt].filter(Boolean).join('，')
+  prompt = annotatePromptEntityNames(prompt, characterNames, assets, 'character')
+  prompt = annotatePromptEntityNames(prompt, sceneNames, assets, 'scene')
+  const guide = assets.map((asset, index) => `${asset.label}=图${index + 1}`).join('，')
+  if (guide) {
+    prompt = `${prompt}。参考图对应关系：${guide}。画面中的角色外貌必须严格对应各自参考图，场景质感参考对应场景图，不要混淆人物身份。`
+  }
+  return prompt
+}
+
+function isBlackScreenStoryboard(sb: any) {
+  const text = [
+    sb.title,
+    sb.shotType,
+    sb.description,
+    sb.action,
+    sb.imagePrompt,
+    sb.videoPrompt,
+  ].filter(Boolean).join(' ')
+  return /黑屏|画面全黑|全黑/.test(text)
+}
+
+function ensureBlackFrameImage() {
+  const target = path.join(STORAGE_ROOT, 'images', 'black-frame.png')
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    const onePixelBlackPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+    fs.writeFileSync(target, Buffer.from(onePixelBlackPng, 'base64'))
+  }
+  return BLACK_FRAME_PNG
+}
+
+function findReusableFirstFrameImageGen(storyboardId: number) {
+  return db.select().from(schema.imageGenerations)
+    .where(eq(schema.imageGenerations.storyboardId, storyboardId))
+    .all()
+    .filter((row: any) => row.frameType === 'first_frame')
+    .sort((a: any, b: any) => Number(b.id) - Number(a.id))
+    .find((row: any) => row.status === 'processing' || (row.status === 'completed' && row.localPath))
 }
 
 function buildCharacterReferencePrompt(char: any) {
@@ -558,21 +754,7 @@ function getEpisodeScenes(ep: any) {
 }
 
 function getStoryboardReferenceImages(sb: any) {
-  const refs: string[] = []
-  const pushRef = (value?: string | null) => {
-    if (!value || refs.includes(value) || refs.length >= 8) return
-    refs.push(value)
-  }
-  if (sb.sceneId) {
-    const [scene] = db.select().from(schema.scenes).where(eq(schema.scenes.id, sb.sceneId)).all()
-    pushRef(scene?.imageUrl)
-  }
-  const charLinks = db.select().from(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, sb.id)).all()
-  for (const link of charLinks as any[]) {
-    const [char] = db.select().from(schema.characters).where(eq(schema.characters.id, link.characterId)).all()
-    pushRef(char?.imageUrl)
-  }
-  return refs
+  return getReadyStoryboardReferenceAssets(sb).map(asset => asset.path)
 }
 
 function normalizedScriptText(value?: string | null) {
@@ -679,7 +861,6 @@ async function ensureVoiceDesignAndSamples(ep: any, drama: any, textConfigId?: n
 async function ensureStoryboards(ep: any, drama: any, textConfigId?: number | null, job?: AutoJob, textConfig?: AIConfig | null) {
   if (getEpisodeStoryboards(ep.id).length) return
   await ensureScriptAndContext(ep, drama, textConfigId, job, textConfig)
-  await ensureVoiceDesignAndSamples(ep, drama, textConfigId, job, textConfig)
   assertAutoJobActive(job)
   await runEpisodeAgent(
     'storyboard_breaker',
@@ -698,6 +879,7 @@ async function ensureStoryboards(ep: any, drama: any, textConfigId?: number | nu
     3000,
     job,
   )
+  await ensureVoiceDesignAndSamples(ep, drama, textConfigId, job, textConfig)
 }
 
 async function ensureCharacterImages(ep: any, drama: any) {
@@ -768,6 +950,26 @@ async function ensureShotImages(ep: any, drama: any) {
   const tasks: Array<{ sb: any; genId: number }> = []
 
   for (const sb of pendingStoryboards) {
+    const reusable = findReusableFirstFrameImageGen(sb.id)
+    if (reusable?.status === 'completed' && reusable.localPath) {
+      db.update(schema.storyboards)
+        .set({ firstFrameImage: reusable.localPath, status: 'image_completed', updatedAt: now() })
+        .where(eq(schema.storyboards.id, sb.id))
+        .run()
+      continue
+    }
+    if (reusable?.status === 'processing') {
+      tasks.push({ sb, genId: reusable.id })
+      continue
+    }
+    if (isBlackScreenStoryboard(sb)) {
+      const blackFrame = ensureBlackFrameImage()
+      db.update(schema.storyboards)
+        .set({ firstFrameImage: blackFrame, status: 'image_completed', updatedAt: now() })
+        .where(eq(schema.storyboards.id, sb.id))
+        .run()
+      continue
+    }
     const referenceImages = getStoryboardReferenceImages(sb)
     const genId = await generateImage({
       storyboardId: sb.id,
@@ -799,7 +1001,10 @@ async function ensureVideos(ep: any, drama: any) {
   const pending = storyboards.filter((sb: any) => !sb.videoUrl)
   if (!pending.length) return
   const orientation = dramaOrientation(drama)
-  const { width, height } = parseSize(orientationVideoSize(orientation), '1280x720')
+  const configId = getProjectVideoConfigId(drama, ep.videoConfigId)
+  const videoConfig = getVideoConfigById(configId)
+  const { width, height } = parseSize(configuredVideoSize(videoConfig, orientation), '1280x720')
+  const fps = configuredVideoFps(videoConfig)
   const aspectRatio = orientationAspectRatio(orientation)
   const tasks: Array<{ sb: any; genId: number }> = []
 
@@ -815,7 +1020,8 @@ async function ensureVideos(ep: any, drama: any) {
       height,
       referenceMode: first ? 'single' : 'none',
       imageUrl: first || undefined,
-      configId: ep.videoConfigId ?? undefined,
+      fps: fps || undefined,
+      configId,
     })
     tasks.push({ sb, genId })
   }
@@ -833,6 +1039,58 @@ async function ensureVideos(ep: any, drama: any) {
   }
 }
 
+async function ensureDubbing(ep: any, drama: any, job?: AutoJob) {
+  const storyboards = getEpisodeStoryboards(ep.id)
+  const pending = storyboards
+    .map((sb: any) => ({ sb, parsed: parseDialogueForTTS(sb.dialogue) }))
+    .filter(({ sb, parsed }) => !parsed.ignorable && !sb.ttsAudioUrl)
+  if (!pending.length) return
+
+  const audioCloneConfigId = getProjectAudioCloneConfigId(drama, ep.audioConfigId)
+  const dramaCharacters = db.select().from(schema.characters)
+    .where(eq(schema.characters.dramaId, drama.id))
+    .all()
+    .filter((char: any) => !char.deletedAt)
+
+  await Promise.all(pending.map(async ({ sb, parsed }) => {
+    assertAutoJobActive(job)
+    const speakerCharacter = parsed.speaker
+      ? resolveSpeakerCharacter(sb, parsed.speaker, dramaCharacters)
+      : null
+    if (speakerCharacter?.voiceProvider === 'custom-design' && !speakerCharacter.voiceSampleUrl) {
+      throw new Error(`第${ep.episodeNumber}集 镜头${sb.storyboardNumber} 角色「${speakerCharacter.name}」缺少声音样本`)
+    }
+
+    const voiceId = speakerCharacter?.voiceStyle || 'alloy'
+    db.update(schema.storyboards)
+      .set({ status: 'tts_processing', ttsAudioUrl: null, updatedAt: now() })
+      .where(eq(schema.storyboards.id, sb.id))
+      .run()
+    try {
+      const audioPath = await generateTTS({
+        text: parsed.pureText,
+        voice: voiceId,
+        purpose: speakerCharacter?.voiceSampleUrl ? 'clone' : undefined,
+        instruct: speakerCharacter?.voiceStyle || voiceId,
+        refText: speakerCharacter ? voiceSampleText(speakerCharacter.name) : undefined,
+        referenceAudioUrl: speakerCharacter?.voiceSampleUrl || null,
+        configId: audioCloneConfigId,
+      })
+      db.update(schema.storyboards)
+        .set({ ttsAudioUrl: audioPath, status: 'tts_completed', updatedAt: now() })
+        .where(eq(schema.storyboards.id, sb.id))
+        .run()
+      if (job) addJobLog(job, `已生成镜头${sb.storyboardNumber}配音`, ep.episodeNumber, 'dubbing')
+    } catch (err: any) {
+      db.update(schema.storyboards)
+        .set({ status: 'tts_failed', updatedAt: now() })
+        .where(eq(schema.storyboards.id, sb.id))
+        .run()
+      throw err
+    }
+  }))
+}
+
 async function ensureComposed(ep: any, drama: any) {
   const storyboards = getEpisodeStoryboards(ep.id)
   for (const sb of storyboards) {
@@ -841,9 +1099,15 @@ async function ensureComposed(ep: any, drama: any) {
     await composeStoryboard(sb.id)
   }
 
+  const latestStoryboards = getEpisodeStoryboards(ep.id)
+  const latestSourceUpdatedAt = latestStoryboards
+    .map((sb: any) => Date.parse(sb.updatedAt || sb.createdAt || ''))
+    .filter((value: number) => Number.isFinite(value))
+    .reduce((max: number, value: number) => Math.max(max, value), 0)
   const merges = db.select().from(schema.videoMerges).where(eq(schema.videoMerges.episodeId, ep.id)).all()
   const latestMerge = merges[merges.length - 1]
-  if (latestMerge?.status === 'completed') return
+  const latestMergeCompletedAt = Date.parse(latestMerge?.completedAt || '')
+  if (latestMerge?.status === 'completed' && Number.isFinite(latestMergeCompletedAt) && latestMergeCompletedAt >= latestSourceUpdatedAt) return
   const mergeId = await mergeEpisodeVideos(ep.id, drama.id)
   await waitFor(
     () => db.select().from(schema.videoMerges).where(eq(schema.videoMerges.id, mergeId)).all()[0],
@@ -901,6 +1165,10 @@ async function runAutoJobSequential(job: AutoJob) {
       addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
       await ensureSceneImages(ep, drama)
       await waitIfPaused(job)
+      updateJob(job, { currentStage: 'dubbing', detail: `第 ${ep.episodeNumber} 集：正在生成镜头配音` })
+      addJobLog(job, '正在生成镜头配音', ep.episodeNumber, 'dubbing')
+      await ensureDubbing(ep, drama, job)
+      await waitIfPaused(job)
       updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在基于角色和场景参考图生成镜头图片` })
       addJobLog(job, '正在基于角色和场景参考图生成镜头图片', ep.episodeNumber, 'shot_images')
       await ensureShotImages(ep, drama)
@@ -953,6 +1221,10 @@ async function processAutoEpisodeParallel(job: AutoJob, ep: any, drama: any, tex
     updateJob(job, { currentStage: 'scene_images', detail: `第 ${ep.episodeNumber} 集：正在生成场景图片` })
     addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
     await ensureSceneImages(ep, drama)
+    await waitIfPaused(job)
+    updateJob(job, { currentStage: 'dubbing', detail: `第 ${ep.episodeNumber} 集：正在生成镜头配音` })
+    addJobLog(job, '正在生成镜头配音', ep.episodeNumber, 'dubbing')
+    await ensureDubbing(ep, drama, job)
     await waitIfPaused(job)
     updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在生成镜头图片` })
     addJobLog(job, '正在生成镜头图片', ep.episodeNumber, 'shot_images')
@@ -1117,6 +1389,11 @@ async function runAutoJob(job: AutoJob) {
         updateJob(job, { currentStage: 'scene_images', detail: `第 ${ep.episodeNumber} 集：正在生成场景图片` })
         addJobLog(job, '正在生成场景图片', ep.episodeNumber, 'scene_images')
         await ensureSceneImages(ep, drama)
+
+        await waitIfPaused(job)
+        updateJob(job, { currentStage: 'dubbing', detail: `第 ${ep.episodeNumber} 集：正在生成镜头配音` })
+        addJobLog(job, '正在生成镜头配音', ep.episodeNumber, 'dubbing')
+        await ensureDubbing(ep, drama, job)
 
         await waitIfPaused(job)
         updateJob(job, { currentStage: 'shot_images', detail: `第 ${ep.episodeNumber} 集：正在生成镜头图片` })

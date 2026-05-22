@@ -101,6 +101,11 @@ export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   generateTTS: (id: number, configId?: number | null) => api.post(`/storyboards/${id}/generate-tts`, { ...(configId ? { config_id: configId } : {}) }),
+  listDubbings: (episodeId: number) => api.get(`/storyboards/episodes/${episodeId}/dubbings`),
+  createDubbing: (data: any) => api.post('/storyboards/dubbings', data),
+  updateDubbing: (id: number, data: any) => api.put(`/storyboards/dubbings/${id}`, data),
+  deleteDubbing: (id: number) => api.del(`/storyboards/dubbings/${id}`),
+  generateDubbingTTS: (id: number, configId?: number | null) => api.post(`/storyboards/dubbings/${id}/generate-tts`, { ...(configId ? { config_id: configId } : {}) }),
   uploadFrame: (id: number, frameType: 'first_frame' | 'last_frame', file: File) => {
     const body = new FormData()
     body.append('file', file)
@@ -116,7 +121,9 @@ export const storyboardAPI = {
 }
 
 export const characterAPI = {
+  create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
+  del: (id: number) => api.del(`/characters/${id}`),
   voiceSample: (id: number, episodeId: number, configId?: number | null) => api.post(`/characters/${id}/generate-voice-sample`, { episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),
   generateImage: (id: number, episodeId?: number | null, configId?: number | null) => api.post(`/characters/${id}/generate-image`, { ...(episodeId ? { episode_id: episodeId } : {}), ...(configId ? { config_id: configId } : {}) }),
   batchImages: (ids: number[], episodeId: number, configId?: number | null) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId, ...(configId ? { config_id: configId } : {}) }),

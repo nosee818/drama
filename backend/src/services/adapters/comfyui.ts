@@ -45,6 +45,32 @@ function parseSize(size?: string | null) {
   return { width: Number(match?.[1] || 1024), height: Number(match?.[2] || 1024) }
 }
 
+function firstFiniteNumber(...values: any[]) {
+  for (const value of values) {
+    const num = Number(value)
+    if (Number.isFinite(num) && num > 0) return num
+  }
+  return null
+}
+
+function configuredVideoSize(settings: Record<string, any>, aspectRatio?: string | null) {
+  const resolution = String(settings.videoResolution ?? settings.video_resolution ?? settings.resolution ?? '').toLowerCase()
+  const preset = resolution === '720p' || resolution === '720'
+    ? { width: 1280, height: 720 }
+    : resolution === '1080p' || resolution === '1080'
+      ? { width: 1920, height: 1080 }
+      : null
+  const width = firstFiniteNumber(preset?.width, settings.defaultWidth, settings.default_width, settings.videoWidth, settings.video_width, settings.width)
+  const height = firstFiniteNumber(preset?.height, settings.defaultHeight, settings.default_height, settings.videoHeight, settings.video_height, settings.height)
+  if (!width || !height) return null
+
+  const wide = Math.max(width, height)
+  const narrow = Math.min(width, height)
+  return aspectRatio === '9:16'
+    ? { width: narrow, height: wide }
+    : { width: wide, height: narrow }
+}
+
 function renderWorkflow(workflow: any, values: Record<string, any>): any {
   if (Array.isArray(workflow)) return workflow.map((item) => renderWorkflow(item, values))
   if (workflow && typeof workflow === 'object') {
@@ -54,6 +80,35 @@ function renderWorkflow(workflow: any, values: Record<string, any>): any {
   const exactMatch = workflow.match(/^\{\{(\w+)\}\}$/)
   if (exactMatch) return Object.prototype.hasOwnProperty.call(values, exactMatch[1]) ? values[exactMatch[1]] : ''
   return workflow.replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] == null ? '' : String(values[key]))
+}
+
+function setIfPresent(inputs: Record<string, any>, aliases: string[], value: any, preserveLinks = false) {
+  for (const key of aliases) {
+    if (!Object.prototype.hasOwnProperty.call(inputs, key)) continue
+    if (preserveLinks && Array.isArray(inputs[key])) continue
+    inputs[key] = value
+  }
+}
+
+function applyVideoWorkflowParams(workflow: any, values: Record<string, any>) {
+  if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) return workflow
+
+  for (const node of Object.values(workflow) as any[]) {
+    const inputs = node?.inputs
+    if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) continue
+
+    setIfPresent(inputs, ['prompt', 'text', 'input', 'positive', 'positive_prompt', 'video_prompt'], values.prompt, true)
+    setIfPresent(inputs, ['negative', 'negative_prompt'], values.negative_prompt, true)
+    setIfPresent(inputs, ['width', 'Width', 'video_width', 'VideoWidth'], values.width, true)
+    setIfPresent(inputs, ['height', 'Height', 'video_height', 'VideoHeight'], values.height, true)
+    setIfPresent(inputs, ['fps', 'frame_rate', 'frameRate'], values.fps, true)
+    setIfPresent(inputs, ['frame_count', 'num_frames', 'video_frames', 'frames', 'FrameCount', 'Frames'], values.frame_count, true)
+    setIfPresent(inputs, ['duration', 'video_duration', 'seconds'], values.duration, true)
+    setIfPresent(inputs, ['image', 'input_image', 'reference_image', 'start_image', 'first_frame'], values.input_image, true)
+    setIfPresent(inputs, ['last_image', 'end_image', 'last_frame'], values.last_frame, true)
+  }
+
+  return workflow
 }
 
 function isBlankImageName(value: any) {
@@ -133,6 +188,22 @@ function findHistoryOutputs(result: any, taskId?: string) {
   return historyEntry?.outputs || {}
 }
 
+function findHistoryError(result: any, taskId?: string) {
+  if (!result || typeof result !== 'object') return null
+  const entry = taskId ? result[taskId] : Object.values(result).find((item: any) => item?.status)
+  const status = (entry as any)?.status
+  if (!status || status.completed === true) return null
+  if (status.status_str && status.status_str !== 'error') return null
+
+  const messages = Array.isArray(status.messages) ? status.messages : []
+  for (const message of messages) {
+    if (!Array.isArray(message) || message[0] !== 'execution_error') continue
+    const detail = message[1] || {}
+    return detail.exception_message || detail.exception_type || 'ComfyUI execution error'
+  }
+  return status.status_str === 'error' ? 'ComfyUI execution error' : null
+}
+
 function findOutputFile(result: any, serviceType: 'image' | 'video' | 'audio', config?: AIConfig, taskId?: string) {
   const outputs = findHistoryOutputs(result, taskId)
   const preferred = serviceType === 'image'
@@ -160,7 +231,11 @@ class ComfyUIBase {
     this.currentConfig = config
     const settings = config.settings || {}
     const outputPrefix = values.filename_prefix || values.filenamePrefix || `veryai-${values.task_id || Date.now()}`
-    const workflow = pruneUnavailableLoadImageNodes(applyOutputFilenamePrefix(renderWorkflow(parseWorkflow(settings), values), outputPrefix))
+    const renderedWorkflow = renderWorkflow(parseWorkflow(settings), values)
+    const workflowWithParams = values.__apply_video_params
+      ? applyVideoWorkflowParams(renderedWorkflow, values)
+      : renderedWorkflow
+    const workflow = pruneUnavailableLoadImageNodes(applyOutputFilenamePrefix(workflowWithParams, outputPrefix))
     return {
       url: joinProviderUrl(config.baseUrl, '', config.endpoint || settings.endpoint || '/prompt'),
       method: 'POST',
@@ -341,21 +416,48 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
   buildGenerateRequest(config: AIConfig, record: VideoGenerationRecord): ProviderRequest {
     const settings = config.settings || {}
     const duration = Number(record.duration || 5)
-    const fps = Number(settings.fps || 24)
-    const fallbackSize = record.aspectRatio === '9:16' ? '720x1280' : '1280x720'
+    const fps = firstFiniteNumber(record.fps, settings.fps, settings.defaultFps, settings.default_fps, settings.frameRate, settings.frame_rate) || 25
+    const fallbackSize = record.aspectRatio === '9:16' ? '1080x1920' : '1920x1080'
     const parsedSize = parseSize(fallbackSize)
-    const width = Number(record.width || parsedSize.width)
-    const height = Number(record.height || parsedSize.height)
+    const configSize = configuredVideoSize(settings, record.aspectRatio)
+    const width = Number(record.width || configSize?.width || parsedSize.width)
+    const height = Number(record.height || configSize?.height || parsedSize.height)
     const frameCount = Math.max(1, Math.round(duration * fps) + 1)
+    const referenceImages = parseReferenceImages(record.referenceImageUrls)
+    const inputImage = record.imageUrl || record.firstFrameUrl || referenceImages[0] || ''
     return this.buildPromptRequest(config, {
       prompt: record.prompt || '',
+      text: record.prompt || '',
+      input: record.prompt || '',
+      positive: record.prompt || '',
+      positive_prompt: record.prompt || '',
+      video_prompt: record.prompt || '',
+      negative_prompt: '',
       model: record.model || config.model,
       first_frame: record.firstFrameUrl || record.imageUrl || '',
       last_frame: record.lastFrameUrl || '',
-      input_image: record.imageUrl || record.firstFrameUrl || '',
+      input_image: inputImage,
+      image: inputImage,
+      reference_image: inputImage,
+      reference_images: referenceImages,
+      input_images: referenceImages,
+      image1: referenceImages[0] || inputImage,
+      image2: referenceImages[1] || '',
+      image3: referenceImages[2] || '',
+      image4: referenceImages[3] || '',
+      reference_count: referenceImages.length || (inputImage ? 1 : 0),
+      has_image1: !!(referenceImages[0] || inputImage),
+      has_image2: !!referenceImages[1],
+      has_image3: !!referenceImages[2],
+      has_image4: !!referenceImages[3],
       duration,
+      video_duration: duration,
+      seconds: duration,
       fps,
+      frame_rate: fps,
       frame_count: frameCount,
+      num_frames: frameCount,
+      video_frames: frameCount,
       FrameCount: frameCount,
       frames: frameCount,
       Frames: frameCount,
@@ -372,6 +474,7 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
       seed: Math.floor(Math.random() * 2147483647),
       task_id: record.id,
       filename_prefix: `veryai-video-${record.id || Date.now()}`,
+      __apply_video_params: settings.autoFillVideoParams !== false && settings.auto_fill_video_params !== false,
     })
   }
 
@@ -384,6 +487,8 @@ export class ComfyUIVideoAdapter extends ComfyUIBase implements VideoProviderAda
   }
 
   parsePollResponse(result: any, config?: AIConfig, taskId?: string): VideoPollResponse {
+    const error = findHistoryError(result, taskId)
+    if (error) return { status: 'failed', error }
     const url = findOutputFile(result, 'video', config || this.currentConfig || undefined, taskId) as string | null
     if (url) return { status: 'completed', videoUrl: url }
     return { status: 'processing' }

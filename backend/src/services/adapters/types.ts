@@ -112,6 +112,7 @@ export interface VideoGenerationRecord {
   aspectRatio?: string | null
   width?: number | null
   height?: number | null
+  fps?: number | null
   // ... 其他字段
 }
 
